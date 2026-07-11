@@ -1095,6 +1095,20 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 	filter->audio_track = audio_track;
 }
 
+/* B13: persist the replay-buffer hotkey bindings into the filter settings
+ * before the replay output (which owns them) is destroyed, so bindings set
+ * during the session survive a restart/disable/remove instead of being lost. */
+static void save_replay_hotkeys(struct source_record_filter_context *context)
+{
+	if (!context->replayOutput)
+		return;
+	obs_data_t *hotkeys = obs_hotkeys_save_output(context->replayOutput);
+	obs_data_t *settings = obs_source_get_settings(context->source);
+	obs_data_set_obj(settings, "replay_hotkeys", hotkeys);
+	obs_data_release(settings);
+	obs_data_release(hotkeys);
+}
+
 /* Tolerant "WxH" parser: accepts x, X, *, or the UTF-8 multiplication sign
  * U+00D7 as separator, with optional surrounding spaces. Returns false if it
  * cannot read two numbers, so the caller can preserve the user's typed text. */
@@ -1513,6 +1527,7 @@ static void source_record_filter_destroy(void *data)
 
 	stop_output_sync(context, context->fileOutput);
 	stop_output_sync(context, context->streamOutput);
+	save_replay_hotkeys(context);
 	stop_output_sync(context, context->replayOutput);
 
 	if (context->enableHotkey != OBS_INVALID_HOTKEY_PAIR_ID)
@@ -1780,6 +1795,7 @@ static void source_record_filter_tick(void *data, float seconds)
 			context->streamOutput = NULL;
 		}
 		if (context->replayOutput) {
+			save_replay_hotkeys(context);
 			queue_force_stop(context, context->replayOutput, true);
 			context->replayOutput = NULL;
 		}
@@ -1841,6 +1857,7 @@ static void source_record_filter_tick(void *data, float seconds)
 			context->streamOutput = NULL;
 		}
 		if (context->replayOutput) {
+			save_replay_hotkeys(context);
 			queue_force_stop(context, context->replayOutput, false);
 			context->replayOutput = NULL;
 		}
@@ -2248,6 +2265,7 @@ static void source_record_filter_filter_remove(void *data, obs_source_t *parent)
 	context->closing = true;
 	stop_output_sync(context, context->fileOutput);
 	stop_output_sync(context, context->streamOutput);
+	save_replay_hotkeys(context);
 	stop_output_sync(context, context->replayOutput);
 	signal_handler_disconnect(obs_get_signal_handler(), "video_reset", on_video_reset, context);
 	obs_frontend_remove_event_callback(frontend_event, context);
