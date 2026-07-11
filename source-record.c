@@ -562,31 +562,31 @@ static bool (*obs_encoder_set_frame_rate_divisor_func)(obs_encoder_t *, uint32_t
 
 static void update_video_encoder(struct source_record_filter_context *filter, obs_data_t *settings)
 {
-	if (obs_encoder_video(filter->encoder) != filter->video_output) {
-		if (obs_encoder_active(filter->encoder)) {
-			obs_encoder_release(filter->encoder);
-			const char *enc_id = get_encoder_id(settings);
-			filter->encoder = obs_video_encoder_create(enc_id, obs_source_get_name(filter->source), settings, NULL);
-		}
+	/* B5: never release/recreate an active encoder here. obs_encoder_video()
+	 * compares against the fps_override wrapper, so with frame_rate_divisor>=2
+	 * it never equals filter->video_output and the old code recreated a live
+	 * encoder -> double-encoding. When active, media already equals
+	 * video_output (it is never swapped under an active encoder), so only
+	 * (re-)point and reconfigure while idle. */
+	if (!obs_encoder_active(filter->encoder)) {
 		obs_encoder_set_video(filter->encoder, filter->video_output);
-	}
-	uint32_t divisor = (uint32_t)obs_data_get_int(settings, "frame_rate_divisor");
-	if (divisor > 1 && obs_encoder_set_frame_rate_divisor_func)
-		obs_encoder_set_frame_rate_divisor_func(filter->encoder, divisor);
-	bool scale = obs_data_get_bool(settings, "scale");
-	if (scale) {
-		uint32_t width = (uint32_t)obs_data_get_int(settings, "width");
-		uint32_t height = (uint32_t)obs_data_get_int(settings, "height");
-		if (width > 0 && height > 0) {
-			obs_encoder_set_scaled_size(filter->encoder, width, height);
+		uint32_t divisor = (uint32_t)obs_data_get_int(settings, "frame_rate_divisor");
+		if (obs_encoder_set_frame_rate_divisor_func)
+			obs_encoder_set_frame_rate_divisor_func(filter->encoder, divisor > 1 ? divisor : 1);
+		bool scale = obs_data_get_bool(settings, "scale");
+		if (scale) {
+			uint32_t width = (uint32_t)obs_data_get_int(settings, "width");
+			uint32_t height = (uint32_t)obs_data_get_int(settings, "height");
+			if (width > 0 && height > 0)
+				obs_encoder_set_scaled_size(filter->encoder, width, height);
+			else
+				obs_encoder_set_scaled_size(filter->encoder, 0, 0);
+			if (obs_encoder_set_gpu_scale_type_func)
+				obs_encoder_set_gpu_scale_type_func(
+					filter->encoder, (enum obs_scale_type)obs_data_get_int(settings, "scale_type"));
 		} else {
 			obs_encoder_set_scaled_size(filter->encoder, 0, 0);
 		}
-		if (obs_encoder_set_gpu_scale_type_func)
-			obs_encoder_set_gpu_scale_type_func(filter->encoder,
-							    (enum obs_scale_type)obs_data_get_int(settings, "scale_type"));
-	} else {
-		obs_encoder_set_scaled_size(filter->encoder, 0, 0);
 	}
 	if (filter->fileOutput && obs_output_get_video_encoder(filter->fileOutput) != filter->encoder)
 		obs_output_set_video_encoder(filter->fileOutput, filter->encoder);
