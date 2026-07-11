@@ -384,23 +384,33 @@ static void source_record_replay_saved(void *data, calldata_t *cd)
 	bfree(path_fallback);
 }
 
+/* Deferred encoder release that also owns the B2 source ref: releasing the ref
+ * only after release_encoders runs guarantees the context can't be destroyed
+ * before this queued work executes (independent of "stop" callback ordering). */
+static void release_encoders_task(void *data)
+{
+	struct stop_output *so = data;
+	release_encoders(so->context);
+	obs_source_release(so->source_ref);
+	bfree(so);
+}
+
 void release_output_stopped(void *data, calldata_t *cd)
 {
 	UNUSED_PARAMETER(cd);
 	struct stop_output *so = data;
 	if (!so->context->exiting)
 		run_queued((obs_task_t)obs_output_release, so->output);
-	if (so->context->encoder || so->context->audioEncoder[0]) {
-		if (so->context->exiting || so->context->closing)
-			release_encoders(so->context);
-		else
-			run_queued(release_encoders, so->context);
+	/* When the encoder release is deferred, carry source_ref into that task so
+	 * the context outlives it; otherwise release synchronously here. */
+	if ((so->context->encoder || so->context->audioEncoder[0]) && !so->context->exiting && !so->context->closing) {
+		run_queued(release_encoders_task, so);
+		return;
 	}
-	/* B2: drop the strong ref that kept the context alive while this stop
-	 * was in flight. If the core is already shutting down obs_source_release
-	 * just logs a warning (benign leak) instead of using freed memory. */
+	if (so->context->encoder || so->context->audioEncoder[0])
+		release_encoders(so->context);
 	obs_source_release(so->source_ref);
-	bfree(data);
+	bfree(so);
 }
 
 static void force_stop_output_task(void *data)
