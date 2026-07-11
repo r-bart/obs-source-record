@@ -59,6 +59,11 @@ struct source_record_filter_context {
 };
 
 DARRAY(obs_source_t *) source_record_filters;
+/* Guards source_record_filters: pushed from create (may run on the websocket
+ * thread), erased from destroy (destruction task thread), iterated in
+ * get_properties (UI thread). Holding it during iteration also keeps the
+ * struct alive, since destroy's erase blocks before its bfree. */
+static pthread_mutex_t filters_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void *vendor;
 
@@ -1294,7 +1299,9 @@ static void *source_record_filter_create(obs_data_t *settings, obs_source_t *sou
 	struct source_record_filter_context *context = bzalloc(sizeof(struct source_record_filter_context));
 	context->source = source;
 
+	pthread_mutex_lock(&filters_mutex);
 	da_push_back(source_record_filters, &source);
+	pthread_mutex_unlock(&filters_mutex);
 	context->last_frontend_event = -1;
 	context->enableHotkey = OBS_INVALID_HOTKEY_PAIR_ID;
 	context->pauseHotkeys = OBS_INVALID_HOTKEY_PAIR_ID;
@@ -1308,7 +1315,9 @@ static void *source_record_filter_create(obs_data_t *settings, obs_source_t *sou
 static void source_record_filter_destroy(void *data)
 {
 	struct source_record_filter_context *context = data;
+	pthread_mutex_lock(&filters_mutex);
 	da_erase_item(source_record_filters, &context->source);
+	pthread_mutex_unlock(&filters_mutex);
 	context->closing = true;
 	if (context->output_active) {
 		obs_source_t *parent = obs_filter_get_parent(context->source);
@@ -1946,6 +1955,7 @@ static obs_properties_t *source_record_filter_properties(void *data)
 		struct source_record_filter_context *context = data;
 		struct dstr sources_text;
 		dstr_init(&sources_text);
+		pthread_mutex_lock(&filters_mutex);
 		for (size_t i = 0; i < source_record_filters.num; i++) {
 			if (source_record_filters.array[i] == context->source)
 				continue;
@@ -1958,6 +1968,7 @@ static obs_properties_t *source_record_filter_properties(void *data)
 			}
 			dstr_cat(&sources_text, obs_source_get_name(source_record_filters.array[i]));
 		}
+		pthread_mutex_unlock(&filters_mutex);
 		if (sources_text.len > 0) {
 			obs_data_t *settings = obs_source_get_settings(context->source);
 			obs_data_set_string(settings, "others", sources_text.array);
