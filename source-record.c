@@ -60,6 +60,7 @@ struct source_record_filter_context {
 	struct obs_video_info cached_ovi;
 	uint64_t next_start_attempt;
 	int start_failures;
+	bool max_seconds_reached;
 };
 
 DARRAY(obs_source_t *) source_record_filters;
@@ -1087,7 +1088,10 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 		}
 	}
 	filter->remove_after_record = obs_data_get_bool(settings, "remove_after_record");
-	filter->record_max_seconds = obs_data_get_int(settings, "record_max_seconds");
+	const long long new_max_seconds = obs_data_get_int(settings, "record_max_seconds");
+	if (new_max_seconds != filter->record_max_seconds)
+		filter->max_seconds_reached = false; /* N6: settings change re-arms */
+	filter->record_max_seconds = new_max_seconds;
 	const long long record_mode = obs_data_get_int(settings, "record_mode");
 	const long long stream_mode = obs_data_get_int(settings, "stream_mode");
 	const bool replay_buffer = obs_data_get_bool(settings, "replay_buffer") && !filter->closing;
@@ -1112,6 +1116,10 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 	} else if (record_mode == OUTPUT_MODE_VIRTUAL_CAMERA) {
 		record = obs_frontend_virtualcam_active() && filter->last_frontend_event != OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED;
 	}
+	/* N6: once record_max_seconds was hit this session, stay stopped until a
+	 * *_STOPPED event or a settings change clears the latch. */
+	if (filter->max_seconds_reached)
+		record = false;
 
 	if (parent && filter->view && (record || replay_buffer)) {
 		obs_source_t *view_source = obs_view_get_source(filter->view, SOURCE_CHANNEL);
@@ -1368,6 +1376,9 @@ static void frontend_event(enum obs_frontend_event event, void *data)
 	    event == OBS_FRONTEND_EVENT_VIRTUALCAM_STARTED || event == OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED ||
 	    event == OBS_FRONTEND_EVENT_RECORDING_PAUSED || event == OBS_FRONTEND_EVENT_RECORDING_UNPAUSED) {
 		context->last_frontend_event = (int)event;
+		if (event == OBS_FRONTEND_EVENT_RECORDING_STOPPED || event == OBS_FRONTEND_EVENT_STREAMING_STOPPED ||
+		    event == OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED)
+			context->max_seconds_reached = false; /* N6: session ended, re-arm */
 
 		obs_queue_task(OBS_TASK_GRAPHICS, update_task, data, false);
 	} else if (event == OBS_FRONTEND_EVENT_EXIT || event == OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN) {
@@ -1782,10 +1793,29 @@ static void source_record_filter_tick(void *data, float seconds)
 		uint64_t frameTimeNs = video_output_get_frame_time(video);
 		long long msecs = util_mul_div64(totalFrames, frameTimeNs, 1000000ULL);
 		if (msecs >= context->record_max_seconds * 1000) {
-			obs_data_t *settings = obs_data_create();
-			obs_data_set_int(settings, "record_mode", OUTPUT_MODE_NONE);
-			obs_source_update(context->source, settings);
-			obs_data_release(settings);
+			obs_data_t *s = obs_source_get_settings(context->source);
+			const long long record_mode = obs_data_get_int(s, "record_mode");
+			obs_data_release(s);
+			if (record_mode == OUTPUT_MODE_ALWAYS) {
+				/* websocket auto-stop contract: flip mode to NONE */
+				obs_data_t *settings = obs_data_create();
+				obs_data_set_int(settings, "record_mode", OUTPUT_MODE_NONE);
+				obs_source_update(context->source, settings);
+				obs_data_release(settings);
+			} else {
+				/* N6: session-bound modes must stop transiently, not
+				 * persist record_mode=NONE into the scene collection.
+				 * Latch instead; frontend *_STOPPED / a settings change
+				 * re-arms it. */
+				queue_force_stop(context, context->fileOutput, false);
+				context->fileOutput = NULL;
+				context->record = false;
+				context->max_seconds_reached = true;
+				if (!context->streamOutput && !context->replayOutput && context->output_active) {
+					context->output_active = false;
+					obs_source_dec_showing(obs_filter_get_parent(context->source));
+				}
+			}
 		}
 	}
 }
