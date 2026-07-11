@@ -522,8 +522,17 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 	obs_data_t *s = obs_data_create();
 	char path[512];
 	const char *format = obs_data_get_string(settings, "rec_format");
-	char *filename =
-		os_generate_formatted_filename(GetFormatExt(format), true, obs_data_get_string(settings, "filename_formatting"));
+	/* Honour the profile's "no spaces in filenames" preference for both the
+	 * first file and the muxer's split files. The muxer defaults allow_spaces
+	 * to false, so without this every split file got its spaces turned into
+	 * underscores while the first file (generated here) kept them. */
+	config_t *config = obs_frontend_get_profile_config();
+	const char *out_mode = config ? config_get_string(config, "Output", "Mode") : NULL;
+	const bool adv_out = out_mode && (strcmp(out_mode, "Advanced") == 0 || strcmp(out_mode, "advanced") == 0);
+	const bool without_space =
+		config && config_get_bool(config, adv_out ? "AdvOut" : "SimpleOutput", "FileNameWithoutSpace");
+	char *filename = os_generate_formatted_filename(GetFormatExt(format), !without_space,
+							obs_data_get_string(settings, "filename_formatting"));
 	snprintf(path, 512, "%s/%s", obs_data_get_string(settings, "path"), filename);
 	bfree(filename);
 	ensure_directory(path);
@@ -531,6 +540,7 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 	obs_data_set_string(s, "directory", obs_data_get_string(settings, "path"));
 	obs_data_set_string(s, "format", obs_data_get_string(settings, "filename_formatting"));
 	obs_data_set_string(s, "extension", GetFormatExt(format));
+	obs_data_set_bool(s, "allow_spaces", !without_space);
 	obs_data_set_bool(s, "split_file", obs_data_get_bool(settings, "split_file"));
 	obs_data_set_int(s, "max_size_mb", obs_data_get_int(settings, "max_size_mb"));
 	obs_data_set_int(s, "max_time_sec", obs_data_get_int(settings, "max_time_sec"));
