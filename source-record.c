@@ -58,6 +58,8 @@ struct source_record_filter_context {
 	int last_frontend_event;
 	bool video_reset;
 	struct obs_video_info cached_ovi;
+	uint64_t next_start_attempt;
+	int start_failures;
 };
 
 DARRAY(obs_source_t *) source_record_filters;
@@ -290,15 +292,34 @@ static void queue_start(obs_task_t task, struct source_record_filter_context *co
 	run_queued(task, so);
 }
 
+/* B3: throttle start retries. On success clear the backoff; on failure log once
+ * and schedule the next attempt with exponential backoff (1s..16s), which the
+ * tick honours, instead of hammering obs_output_start every frame. */
+static void note_start_result(struct source_record_filter_context *context, obs_output_t *output, bool started)
+{
+	if (started) {
+		context->start_failures = 0;
+		context->next_start_attempt = 0;
+	} else {
+		if (context->start_failures == 0)
+			blog(LOG_WARNING, "[Source Record] output '%s' failed to start: %s",
+			     obs_source_get_name(context->source), obs_output_get_last_error(output));
+		int shift = context->start_failures++;
+		if (shift > 4)
+			shift = 4;
+		context->next_start_attempt = os_gettime_ns() + (1000000000ULL << shift);
+	}
+}
+
 static void start_file_output_task(void *data)
 {
 	struct start_output *so = data;
 	struct source_record_filter_context *context = so->context;
-	if (obs_output_start(context->fileOutput)) {
-		if (!context->output_active) {
-			context->output_active = true;
-			obs_source_inc_showing(obs_filter_get_parent(context->source));
-		}
+	bool started = obs_output_start(context->fileOutput);
+	note_start_result(context, context->fileOutput, started);
+	if (started && !context->output_active) {
+		context->output_active = true;
+		obs_source_inc_showing(obs_filter_get_parent(context->source));
 	}
 	context->starting_file_output = false;
 	obs_source_release(so->source_ref);
@@ -309,11 +330,11 @@ static void start_stream_output_task(void *data)
 {
 	struct start_output *so = data;
 	struct source_record_filter_context *context = so->context;
-	if (obs_output_start(context->streamOutput)) {
-		if (!context->output_active) {
-			context->output_active = true;
-			obs_source_inc_showing(obs_filter_get_parent(context->source));
-		}
+	bool started = obs_output_start(context->streamOutput);
+	note_start_result(context, context->streamOutput, started);
+	if (started && !context->output_active) {
+		context->output_active = true;
+		obs_source_inc_showing(obs_filter_get_parent(context->source));
 	}
 	context->starting_stream_output = false;
 	obs_source_release(so->source_ref);
@@ -437,11 +458,11 @@ static void start_replay_task(void *data)
 {
 	struct start_output *so = data;
 	struct source_record_filter_context *context = so->context;
-	if (obs_output_start(context->replayOutput)) {
-		if (!context->output_active) {
-			context->output_active = true;
-			obs_source_inc_showing(obs_filter_get_parent(context->source));
-		}
+	bool started = obs_output_start(context->replayOutput);
+	note_start_result(context, context->replayOutput, started);
+	if (started && !context->output_active) {
+		context->output_active = true;
+		obs_source_inc_showing(obs_filter_get_parent(context->source));
 	}
 	context->starting_replay_output = false;
 	obs_source_release(so->source_ref);
@@ -1011,6 +1032,9 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 		filter->closing = true;
 		return;
 	}
+	/* B3: an explicit settings update should retry a failed start immediately */
+	filter->next_start_attempt = 0;
+	filter->start_failures = 0;
 	if (obs_data_get_bool(settings, "scale")) {
 		const char *res = obs_data_get_string(settings, "resolution");
 		uint32_t width = 0, height = 0;
@@ -1654,6 +1678,9 @@ static void source_record_filter_tick(void *data, float seconds)
 		   (context->replayBuffer || context->record || context->stream)) {
 		if (context->starting_file_output || context->starting_stream_output || context->starting_replay_output ||
 		    !context->video_output || !width || !height)
+			return;
+		/* B3: honour the start-failure backoff instead of retrying every frame */
+		if (context->next_start_attempt && os_gettime_ns() < context->next_start_attempt)
 			return;
 		/* Fix: don't start new outputs (and reuse / re-point the encoder)
 		 * while a previous output is still draining it -> use-after-free. */
