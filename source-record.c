@@ -273,9 +273,25 @@ static const char *GetFormatExt(const char *format)
 	return format;
 }
 
+struct start_output {
+	struct source_record_filter_context *context;
+	obs_source_t *source_ref;
+};
+
+/* Queue a start task holding a strong ref to the filter source (B2), so the
+ * context can't be freed before the queued task runs. */
+static void queue_start(obs_task_t task, struct source_record_filter_context *context)
+{
+	struct start_output *so = bmalloc(sizeof(struct start_output));
+	so->context = context;
+	so->source_ref = obs_source_get_ref(context->source);
+	run_queued(task, so);
+}
+
 static void start_file_output_task(void *data)
 {
-	struct source_record_filter_context *context = data;
+	struct start_output *so = data;
+	struct source_record_filter_context *context = so->context;
 	if (obs_output_start(context->fileOutput)) {
 		if (!context->output_active) {
 			context->output_active = true;
@@ -283,11 +299,14 @@ static void start_file_output_task(void *data)
 		}
 	}
 	context->starting_file_output = false;
+	obs_source_release(so->source_ref);
+	bfree(so);
 }
 
 static void start_stream_output_task(void *data)
 {
-	struct source_record_filter_context *context = data;
+	struct start_output *so = data;
+	struct source_record_filter_context *context = so->context;
 	if (obs_output_start(context->streamOutput)) {
 		if (!context->output_active) {
 			context->output_active = true;
@@ -295,6 +314,8 @@ static void start_stream_output_task(void *data)
 		}
 	}
 	context->starting_stream_output = false;
+	obs_source_release(so->source_ref);
+	bfree(so);
 }
 
 static void release_encoders(void *param)
@@ -402,7 +423,8 @@ static void force_stop_output_task(void *data)
 
 static void start_replay_task(void *data)
 {
-	struct source_record_filter_context *context = data;
+	struct start_output *so = data;
+	struct source_record_filter_context *context = so->context;
 	if (obs_output_start(context->replayOutput)) {
 		if (!context->output_active) {
 			context->output_active = true;
@@ -410,6 +432,8 @@ static void start_replay_task(void *data)
 		}
 	}
 	context->starting_replay_output = false;
+	obs_source_release(so->source_ref);
+	bfree(so);
 }
 
 static void ensure_directory(char *path)
@@ -620,7 +644,7 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 
 	filter->starting_file_output = true;
 
-	run_queued(start_file_output_task, filter);
+	queue_start(start_file_output_task, filter);
 }
 
 #define FTL_PROTOCOL "ftl"
@@ -712,7 +736,7 @@ static void start_stream_output(struct source_record_filter_context *filter, obs
 
 	filter->starting_stream_output = true;
 
-	run_queued(start_stream_output_task, filter);
+	queue_start(start_stream_output_task, filter);
 }
 
 static void start_replay_output(struct source_record_filter_context *filter, obs_data_t *settings)
@@ -766,7 +790,7 @@ static void start_replay_output(struct source_record_filter_context *filter, obs
 
 	filter->starting_replay_output = true;
 
-	run_queued(start_replay_task, filter);
+	queue_start(start_replay_task, filter);
 }
 
 static void copy_defaults(obs_data_t *from, obs_data_t *to)
