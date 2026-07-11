@@ -1709,6 +1709,20 @@ static void source_record_filter_tick(void *data, float seconds)
 		obs_source_dec_showing(obs_filter_get_parent(context->source));
 	}
 
+	/* B14: when nothing is active and the encoder is idle, stop pinning the
+	 * parent into the private view. It stayed assigned after every stop, so the
+	 * parent (and its filter chain) kept rendering every frame and stayed
+	 * "showing" forever -> perf drain + ghost source (#38/#40/#135/#141). The
+	 * encoder-idle gate avoids blanking the last draining frames of a stop. */
+	if (!context->record && !context->stream && !context->replayBuffer && !context->output_active &&
+	    (!context->encoder || !obs_encoder_active(context->encoder)) && context->view) {
+		obs_source_t *view_source = obs_view_get_source(context->view, SOURCE_CHANNEL);
+		if (view_source) {
+			obs_view_set_source(context->view, SOURCE_CHANNEL, NULL);
+			obs_source_release(view_source);
+		}
+	}
+
 	if (context->output_active && context->fileOutput && context->record_max_seconds) {
 		int totalFrames = obs_output_get_total_frames(context->fileOutput);
 		video_t *video = obs_output_video(context->fileOutput);
