@@ -714,6 +714,7 @@ static void start_stream_output(struct source_record_filter_context *filter, obs
 {
 	const char *server = obs_data_get_string(settings, "server");
 	bool whip = strstr(server, "whip") != NULL;
+	const char *service_id = whip ? "whip_custom" : "rtmp_custom";
 	/* Build the service settings in a throwaway object so the stream key /
 	 * bearer_token are never written back into the filter's persisted
 	 * settings (which get serialized into the scene collection in clear).
@@ -727,9 +728,16 @@ static void start_stream_output(struct source_record_filter_context *filter, obs
 	/* sanitize scene collections contaminated by earlier versions */
 	obs_data_erase(settings, "bearer_token");
 
+	/* N5: obs_service_update can't change a service's type. If the required
+	 * type changed (RTMP<->WHIP), release the old service and recreate so a
+	 * protocol switch actually connects. Defer the release: the outgoing
+	 * streamOutput references the service by raw pointer until it stops. */
+	if (filter->service && strcmp(obs_service_get_id(filter->service), service_id) != 0) {
+		run_queued((obs_task_t)obs_service_release, filter->service);
+		filter->service = NULL;
+	}
 	if (!filter->service) {
-		filter->service = obs_service_create(whip ? "whip_custom" : "rtmp_custom", obs_source_get_name(filter->source),
-						     service_settings, NULL);
+		filter->service = obs_service_create(service_id, obs_source_get_name(filter->source), service_settings, NULL);
 	} else {
 		obs_service_update(filter->service, service_settings);
 	}
@@ -2827,10 +2835,19 @@ static bool start_stream_source(obs_source_t *source, obs_data_t *request_data, 
 	obs_data_t *settings = obs_source_get_settings(filter);
 
 	const char *server = obs_data_get_string(request_data, "server");
+	const char *key = obs_data_get_string(request_data, "key");
+
+	/* N8: rotating server/key on a live stream must restart the output. On the
+	 * common no-'filter' path restart was never set, so the new credentials
+	 * were silently ignored and the stream stayed on the old ones. */
+	struct source_record_filter_context *context = obs_obj_get_data(filter);
+	if (context && context->output_active &&
+	    ((server && strlen(server) && strcmp(server, obs_data_get_string(settings, "server")) != 0) ||
+	     (key && strlen(key) && strcmp(key, obs_data_get_string(settings, "key")) != 0)))
+		context->restart = true;
+
 	if (server && strlen(server))
 		obs_data_set_string(settings, "server", server);
-
-	const char *key = obs_data_get_string(request_data, "key");
 	if (key && strlen(key))
 		obs_data_set_string(settings, "key", key);
 
