@@ -591,17 +591,28 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 
 static void start_stream_output(struct source_record_filter_context *filter, obs_data_t *settings)
 {
-	if (!filter->service) {
-		const char *server = obs_data_get_string(settings, "server");
-		bool whip = strstr(server, "whip") != NULL;
-		if (whip)
-			obs_data_set_string(settings, "bearer_token", obs_data_get_string(settings, "key"));
+	const char *server = obs_data_get_string(settings, "server");
+	bool whip = strstr(server, "whip") != NULL;
+	/* Build the service settings in a throwaway object so the stream key /
+	 * bearer_token are never written back into the filter's persisted
+	 * settings (which get serialized into the scene collection in clear).
+	 * This also refreshes bearer_token from the current key on update, so
+	 * rotating a WHIP key no longer leaves the service on a stale token. */
+	obs_data_t *service_settings = obs_data_create();
+	obs_data_set_string(service_settings, "server", server);
+	obs_data_set_string(service_settings, "key", obs_data_get_string(settings, "key"));
+	if (whip)
+		obs_data_set_string(service_settings, "bearer_token", obs_data_get_string(settings, "key"));
+	/* sanitize scene collections contaminated by earlier versions */
+	obs_data_erase(settings, "bearer_token");
 
+	if (!filter->service) {
 		filter->service = obs_service_create(whip ? "whip_custom" : "rtmp_custom", obs_source_get_name(filter->source),
-						     settings, NULL);
+						     service_settings, NULL);
 	} else {
-		obs_service_update(filter->service, settings);
+		obs_service_update(filter->service, service_settings);
 	}
+	obs_data_release(service_settings);
 	obs_service_apply_encoder_settings(filter->service, settings, NULL);
 
 	const char *type = NULL;
