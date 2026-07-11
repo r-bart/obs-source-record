@@ -1464,6 +1464,9 @@ static void frontend_event(enum obs_frontend_event event, void *data)
 	    event == OBS_FRONTEND_EVENT_RECORDING_STOPPING || event == OBS_FRONTEND_EVENT_RECORDING_STOPPED ||
 	    event == OBS_FRONTEND_EVENT_VIRTUALCAM_STARTED || event == OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED ||
 	    event == OBS_FRONTEND_EVENT_RECORDING_PAUSED || event == OBS_FRONTEND_EVENT_RECORDING_UNPAUSED) {
+		/* N9: don't act on (or queue update_task for) a closing filter */
+		if (context->closing)
+			return;
 		context->last_frontend_event = (int)event;
 		if (event == OBS_FRONTEND_EVENT_RECORDING_STOPPED || event == OBS_FRONTEND_EVENT_STREAMING_STOPPED ||
 		    event == OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED)
@@ -1488,6 +1491,27 @@ static void on_video_reset(void *data, calldata_t *cd)
 	UNUSED_PARAMETER(cd);
 	struct source_record_filter_context *context = data;
 	context->video_reset = true;
+}
+
+/* N9: the frontend callback vector has no lock; removing our callback from the
+ * destruction thread / an output-stop thread while the UI dispatches an event
+ * is a data race. Do the removal on the UI thread instead. */
+static void remove_frontend_cb_task(void *data)
+{
+	struct source_record_filter_context *context = data;
+	signal_handler_disconnect(obs_get_signal_handler(), "video_reset", on_video_reset, context);
+	obs_frontend_remove_event_callback(frontend_event, context);
+}
+
+static void remove_frontend_cb(struct source_record_filter_context *context)
+{
+	/* wait=true rendezvouses so no in-flight frontend_event uses a freed
+	 * context; skip the hop while exiting (UI may be joining the destruction
+	 * thread during obs_shutdown -> deadlock) or if already on the UI thread. */
+	if (context->exiting || obs_in_task_thread(OBS_TASK_UI))
+		remove_frontend_cb_task(context);
+	else
+		obs_queue_task(OBS_TASK_UI, remove_frontend_cb_task, context, true);
 }
 
 static void *source_record_filter_create(obs_data_t *settings, obs_source_t *source)
@@ -1522,8 +1546,7 @@ static void source_record_filter_destroy(void *data)
 			obs_source_dec_showing(parent);
 		context->output_active = false;
 	}
-	signal_handler_disconnect(obs_get_signal_handler(), "video_reset", on_video_reset, context);
-	obs_frontend_remove_event_callback(frontend_event, context);
+	remove_frontend_cb(context);
 
 	stop_output_sync(context, context->fileOutput);
 	stop_output_sync(context, context->streamOutput);
@@ -2267,8 +2290,7 @@ static void source_record_filter_filter_remove(void *data, obs_source_t *parent)
 	stop_output_sync(context, context->streamOutput);
 	save_replay_hotkeys(context);
 	stop_output_sync(context, context->replayOutput);
-	signal_handler_disconnect(obs_get_signal_handler(), "video_reset", on_video_reset, context);
-	obs_frontend_remove_event_callback(frontend_event, context);
+	remove_frontend_cb(context);
 }
 
 struct obs_source_info source_record_filter_info = {
