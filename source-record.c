@@ -1669,11 +1669,22 @@ static bool encoder_changed(void *data, obs_properties_t *props, obs_property_t 
 		if (!name || !strlen(name))
 			name = obs_module_text("AudioEncoder");
 		obs_property_t *b = obs_properties_get(enc_props, "bitrate");
-		if (b) {
+		if (b && obs_property_get_type(b) == OBS_PROPERTY_INT) {
 			obs_property_int_set_suffix(obs_properties_add_int(enc_props, "audio_bitrate", obs_property_description(b),
 									   obs_property_int_min(b), obs_property_int_max(b),
 									   obs_property_int_step(b)),
 						    obs_property_int_suffix(b));
+			obs_properties_remove_by_name(enc_props, "bitrate");
+		} else if (b && obs_property_get_type(b) == OBS_PROPERTY_LIST &&
+			   obs_property_list_format(b) == OBS_COMBO_FORMAT_INT) {
+			/* Some encoders (CoreAudio AAC on macOS) expose "bitrate" as
+			 * an int-list, not an int. Copying int_min/max/step off it
+			 * yields a [0,0] spinner locked at 0. Rebuild it as a list. */
+			obs_property_t *nb = obs_properties_add_list(enc_props, "audio_bitrate", obs_property_description(b),
+								    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+			const size_t count = obs_property_list_item_count(b);
+			for (size_t i = 0; i < count; i++)
+				obs_property_list_add_int(nb, obs_property_list_item_name(b, i), obs_property_list_item_int(b, i));
 			obs_properties_remove_by_name(enc_props, "bitrate");
 		}
 		obs_properties_add_group(props, "audio_encoder_group", name, OBS_GROUP_NORMAL, enc_props);
