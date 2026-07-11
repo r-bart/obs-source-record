@@ -520,7 +520,6 @@ static void update_video_encoder(struct source_record_filter_context *filter, ob
 static void start_file_output(struct source_record_filter_context *filter, obs_data_t *settings)
 {
 	obs_data_t *s = obs_data_create();
-	char path[512];
 	const char *format = obs_data_get_string(settings, "rec_format");
 	/* Honour the profile's "no spaces in filenames" preference for both the
 	 * first file and the muxer's split files. The muxer defaults allow_spaces
@@ -533,10 +532,12 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 		config && config_get_bool(config, adv_out ? "AdvOut" : "SimpleOutput", "FileNameWithoutSpace");
 	char *filename = os_generate_formatted_filename(GetFormatExt(format), !without_space,
 							obs_data_get_string(settings, "filename_formatting"));
-	snprintf(path, 512, "%s/%s", obs_data_get_string(settings, "path"), filename);
+	struct dstr path = {0};
+	dstr_printf(&path, "%s/%s", obs_data_get_string(settings, "path"), filename);
 	bfree(filename);
-	ensure_directory(path);
-	obs_data_set_string(s, "path", path);
+	ensure_directory(path.array);
+	obs_data_set_string(s, "path", path.array);
+	dstr_free(&path);
 	obs_data_set_string(s, "directory", obs_data_get_string(settings, "path"));
 	obs_data_set_string(s, "format", obs_data_get_string(settings, "filename_formatting"));
 	obs_data_set_string(s, "extension", GetFormatExt(format));
