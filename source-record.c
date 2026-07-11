@@ -2158,13 +2158,14 @@ static bool pause_record_source(obs_source_t *source, obs_data_t *request_data, 
 		return false;
 
 	struct source_record_filter_context *context = obs_obj_get_data(filter);
-	obs_source_release(filter);
-	if (!context->fileOutput) {
+	if (!context || !context->fileOutput) {
 		if (response_data)
 			obs_data_set_string(response_data, "error", "record output is not active");
+		obs_source_release(filter);
 		return false;
 	}
 	obs_output_pause(context->fileOutput, true);
+	obs_source_release(filter);
 	return true;
 }
 
@@ -2175,13 +2176,14 @@ static bool unpause_record_source(obs_source_t *source, obs_data_t *request_data
 		return false;
 
 	struct source_record_filter_context *context = obs_obj_get_data(filter);
-	obs_source_release(filter);
-	if (!context->fileOutput) {
+	if (!context || !context->fileOutput) {
 		if (response_data)
 			obs_data_set_string(response_data, "error", "record output is not active");
+		obs_source_release(filter);
 		return false;
 	}
 	obs_output_pause(context->fileOutput, false);
+	obs_source_release(filter);
 	return true;
 }
 
@@ -2192,10 +2194,10 @@ static bool split_record_source(obs_source_t *source, obs_data_t *request_data, 
 		return false;
 
 	struct source_record_filter_context *context = obs_obj_get_data(filter);
-	obs_source_release(filter);
-	if (!context->fileOutput) {
+	if (!context || !context->fileOutput) {
 		if (response_data)
 			obs_data_set_string(response_data, "error", "record output is not active");
+		obs_source_release(filter);
 		return false;
 	}
 	proc_handler_t *ph = obs_output_get_proc_handler(context->fileOutput);
@@ -2205,9 +2207,11 @@ static bool split_record_source(obs_source_t *source, obs_data_t *request_data, 
 		calldata_free(&cd);
 		if (response_data)
 			obs_data_set_string(response_data, "error", "split_file call failed");
+		obs_source_release(filter);
 		return false;
 	}
 	calldata_free(&cd);
+	obs_source_release(filter);
 	return true;
 }
 
@@ -2218,10 +2222,10 @@ static bool add_chapter_record_source(obs_source_t *source, obs_data_t *request_
 		return false;
 
 	struct source_record_filter_context *context = obs_obj_get_data(filter);
-	obs_source_release(filter);
-	if (!context->fileOutput) {
+	if (!context || !context->fileOutput) {
 		if (response_data)
 			obs_data_set_string(response_data, "error", "record output is not active");
+		obs_source_release(filter);
 		return false;
 	}
 	proc_handler_t *ph = obs_output_get_proc_handler(context->fileOutput);
@@ -2232,9 +2236,11 @@ static bool add_chapter_record_source(obs_source_t *source, obs_data_t *request_
 		calldata_free(&cd);
 		if (response_data)
 			obs_data_set_string(response_data, "error", "add_chapter call failed");
+		obs_source_release(filter);
 		return false;
 	}
 	calldata_free(&cd);
+	obs_source_release(filter);
 	return true;
 }
 
