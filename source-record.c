@@ -949,8 +949,18 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 		obs_encoder_update(filter->encoder, settings);
 	}
 	const int audio_track = obs_data_get_bool(settings, "different_audio") ? (int)obs_data_get_int(settings, "audio_track") : 0;
+	/* N1: audio_output_close() frees the private audio_t while an active audio
+	 * encoder still references it by raw pointer -> UAF at disconnect on stop.
+	 * If the track changes while encoders are active, defer the whole swap
+	 * (this is the tail of update_encoder, so returning skips the audio block). */
+	bool audio_active = false;
+	for (int i = 0; i < MAX_AUDIO_MIXES; i++)
+		if (filter->audioEncoder[i] && obs_encoder_active(filter->audioEncoder[i]))
+			audio_active = true;
+	if (audio_active && audio_track != filter->audio_track)
+		return;
 	if (filter->closing) {
-		if (filter->audio_track == 0 && filter->audio_output) {
+		if (filter->audio_track == 0 && filter->audio_output && !audio_active) {
 			audio_output_close(filter->audio_output);
 			filter->audio_output = NULL;
 		}
