@@ -104,28 +104,50 @@ static bool EncoderAvailable(const char *encoder)
 	return false;
 }
 
+/* B10: obs_source_enum_active_tree visits a nested composite (scene/group) AND
+ * all of its leaves, so summing every node double-counts audio that already
+ * lives in the composite's own submix. Skip nodes whose enumerated parent is a
+ * composite other than the top-level source we started from. */
+struct calc_min_ts_ctx {
+	obs_source_t *top;
+	uint64_t *min_ts;
+};
+
+struct mix_audio_ctx {
+	obs_source_t *top;
+	struct obs_source_audio *mixed_audio;
+};
+
+static inline bool in_nested_composite(obs_source_t *parent, obs_source_t *top)
+{
+	return parent && parent != top && (obs_source_get_output_flags(parent) & OBS_SOURCE_COMPOSITE) != 0;
+}
+
 static void calc_min_ts(obs_source_t *parent, obs_source_t *child, void *param)
 {
-	UNUSED_PARAMETER(parent);
-	uint64_t *min_ts = param;
+	struct calc_min_ts_ctx *ctx = param;
+	if (in_nested_composite(parent, ctx->top))
+		return;
 	if (!child || obs_source_audio_pending(child))
 		return;
 	const uint64_t ts = obs_source_get_audio_timestamp(child);
 	if (!ts)
 		return;
-	if (!*min_ts || ts < *min_ts)
-		*min_ts = ts;
+	if (!*ctx->min_ts || ts < *ctx->min_ts)
+		*ctx->min_ts = ts;
 }
 
 static void mix_audio(obs_source_t *parent, obs_source_t *child, void *param)
 {
-	UNUSED_PARAMETER(parent);
+	struct mix_audio_ctx *ctx = param;
+	if (in_nested_composite(parent, ctx->top))
+		return;
 	if (!child || obs_source_audio_pending(child))
 		return;
 	const uint64_t ts = obs_source_get_audio_timestamp(child);
 	if (!ts)
 		return;
-	struct obs_source_audio *mixed_audio = param;
+	struct obs_source_audio *mixed_audio = ctx->mixed_audio;
 	const size_t pos = (size_t)ns_to_audio_frames(mixed_audio->samples_per_sec, ts - mixed_audio->timestamp);
 
 	if (pos > AUDIO_OUTPUT_FRAMES)
@@ -175,7 +197,8 @@ static bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end
 	const uint32_t flags = obs_source_get_output_flags(audio_source);
 	if ((flags & OBS_SOURCE_COMPOSITE) != 0) {
 		uint64_t min_ts = 0;
-		obs_source_enum_active_tree(audio_source, calc_min_ts, &min_ts);
+		struct calc_min_ts_ctx cctx = {audio_source, &min_ts};
+		obs_source_enum_active_tree(audio_source, calc_min_ts, &cctx);
 		if (min_ts) {
 			struct obs_source_audio mixed_audio = {0};
 			for (size_t i = 0; i < MAX_AUDIO_CHANNELS; i++) {
@@ -185,7 +208,8 @@ static bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end
 			mixed_audio.speakers = audio_output_get_channels(filter->audio_output);
 			mixed_audio.samples_per_sec = audio_output_get_sample_rate(filter->audio_output);
 			mixed_audio.format = AUDIO_FORMAT_FLOAT_PLANAR;
-			obs_source_enum_active_tree(audio_source, mix_audio, &mixed_audio);
+			struct mix_audio_ctx mctx = {audio_source, &mixed_audio};
+			obs_source_enum_active_tree(audio_source, mix_audio, &mctx);
 
 			for (size_t mix_idx = 0; mix_idx < MAX_AUDIO_MIXES; mix_idx++) {
 				if ((mixers & (1 << mix_idx)) == 0)
@@ -227,9 +251,14 @@ static bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end
 	}
 
 	if (obs_source_audio_pending(audio_source)) {
+		/* B11: never return false -> the audio thread drops the whole tick,
+		 * splicing 1024 samples the encoder can't compensate (click +
+		 * cumulative A/V drift). Emit silence for this tick instead (the mix
+		 * buffers are already zeroed by input_and_output). */
+		*out_ts = start_ts_in;
 		if (release_audio)
 			obs_source_release(audio_source);
-		return false;
+		return true;
 	}
 
 	struct obs_source_audio_mix audio;
