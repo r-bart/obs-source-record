@@ -1127,8 +1127,15 @@ static void source_record_filter_defaults(obs_data_t *settings)
 	config_t *config = obs_frontend_get_profile_config();
 
 	const char *mode = config_get_string(config, "Output", "Mode");
+	if (!mode)
+		mode = "Simple";
 	const char *type = config_get_string(config, "AdvOut", "RecType");
-	const char *adv_path = strcmp(type, "Standard") != 0 || strcmp(type, "standard") != 0
+	if (!type)
+		type = "Standard";
+	/* type != "Standard" (either case) selects the FFmpeg custom path,
+	 * otherwise the standard recording path. The original || made this
+	 * tautologically true, so RecType=Standard wrongly used FFFilePath. */
+	const char *adv_path = strcmp(type, "Standard") != 0 && strcmp(type, "standard") != 0
 				       ? config_get_string(config, "AdvOut", "FFFilePath")
 				       : config_get_string(config, "AdvOut", "RecFilePath");
 	bool adv_out = strcmp(mode, "Advanced") == 0 || strcmp(mode, "advanced") == 0;
