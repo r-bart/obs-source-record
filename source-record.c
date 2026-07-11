@@ -474,6 +474,12 @@ static const char *get_encoder_id(obs_data_t *settings)
 	} else if (strcmp(enc_id, "apple_hevc") == 0) {
 		enc_id = "com.apple.videotoolbox.videoencoder.ave.hevc";
 	}
+	/* Guard against saved settings referencing an encoder that isn't
+	 * available (e.g. "ffmpeg_output", or a GPU encoder from another
+	 * machine): fall back to x264 rather than creating a placeholder
+	 * encoder that fails to initialize and gets retried every frame. */
+	if (!EncoderAvailable(enc_id))
+		enc_id = "obs_x264";
 	return enc_id;
 }
 
@@ -1163,7 +1169,10 @@ static void source_record_filter_defaults(obs_data_t *settings)
 		if (strcmp(quality, "Stream") == 0 || strcmp(quality, "stream") == 0) {
 			enc_id = config_get_string(config, "SimpleOutput", "StreamEncoder");
 		} else if (strcmp(quality, "Lossless") == 0 || strcmp(quality, "lossless") == 0) {
-			enc_id = "ffmpeg_output";
+			/* "ffmpeg_output" is an OUTPUT id, not an encoder; the plugin
+			 * records via ffmpeg_muxer and cannot reproduce the frontend's
+			 * lossless pipeline. Fall back to the configured stream encoder. */
+			enc_id = config_get_string(config, "SimpleOutput", "StreamEncoder");
 		} else {
 			enc_id = config_get_string(config, "SimpleOutput", "RecEncoder");
 		}
