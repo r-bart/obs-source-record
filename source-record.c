@@ -81,6 +81,16 @@ static void run_queued(obs_task_t task, void *param)
 	}
 }
 
+/* Output/encoder releases must go to libobs' dedicated destruction thread:
+ * obs_output_destroy blocks in os_event_wait(stopping_event), and ffmpeg-mux
+ * deactivation waits on its child process. Running that on the graphics task
+ * queue freezes every video mix (all recordings stall at once) and hangs OBS
+ * shutdown — the upstream #99 failure mode. */
+static void run_queued_destroy(obs_task_t task, void *param)
+{
+	obs_queue_task(OBS_TASK_DESTROY, task, param, false);
+}
+
 static const char *source_record_filter_get_name(void *unused)
 {
 	UNUSED_PARAMETER(unused);
@@ -453,11 +463,11 @@ void release_output_stopped(void *data, calldata_t *cd)
 	UNUSED_PARAMETER(cd);
 	struct stop_output *so = data;
 	if (!so->context->exiting)
-		run_queued((obs_task_t)obs_output_release, so->output);
+		run_queued_destroy((obs_task_t)obs_output_release, so->output);
 	/* When the encoder release is deferred, carry source_ref into that task so
 	 * the context outlives it; otherwise release synchronously here. */
 	if ((so->context->encoder || so->context->audioEncoder[0]) && !so->context->exiting && !so->context->closing) {
-		run_queued(release_encoders_task, so);
+		run_queued_destroy(release_encoders_task, so);
 		return;
 	}
 	if (so->context->encoder || so->context->audioEncoder[0])
@@ -479,7 +489,14 @@ static void force_stop_output_task(void *data)
 		signal_handler_connect(sh, "stop", release_output_stopped, data);
 		obs_output_force_stop(so->output);
 	} else {
-		obs_output_force_stop(so->output);
+		/* #99 root cause: obs_output_force_stop on an output with no data
+		 * flowing (start failed, or it already stopped) resets the output's
+		 * stopping_event; ffmpeg_mux_stop only sets flags and relies on the
+		 * data path to deactivate, so with no packets nothing ever signals
+		 * the event again. The obs_output_destroy triggered by our release
+		 * then blocks forever in os_event_wait() — on the graphics thread,
+		 * which freezes every recording in OBS. An inactive output has
+		 * nothing to stop: skip the stop, go straight to cleanup. */
 		release_output_stopped(data, NULL);
 	}
 }
