@@ -814,7 +814,7 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 		} else {
 			struct audio_output_info oi = {0};
 			oi.name = obs_source_get_name(filter->source);
-			oi.speakers = SPEAKERS_STEREO;
+			oi.speakers = audio_output_get_info(obs_get_audio())->speakers;
 			oi.samples_per_sec = audio_output_get_sample_rate(obs_get_audio());
 			oi.format = AUDIO_FORMAT_FLOAT_PLANAR;
 			oi.input_param = filter;
@@ -828,7 +828,7 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 		filter->audio_output = NULL;
 		struct audio_output_info oi = {0};
 		oi.name = obs_source_get_name(filter->source);
-		oi.speakers = SPEAKERS_STEREO;
+		oi.speakers = audio_output_get_info(obs_get_audio())->speakers;
 		oi.samples_per_sec = audio_output_get_sample_rate(obs_get_audio());
 		oi.format = AUDIO_FORMAT_FLOAT_PLANAR;
 		oi.input_param = filter;
