@@ -2039,7 +2039,13 @@ static void find_filter(obs_source_t *parent, obs_source_t *child, void *param)
 	if (strcmp(id, "source_record_filter") != 0)
 		return;
 	obs_source_t **filter = param;
-	*filter = child;
+	/* N3: take the ref inside the callback (the enum holds filter_mutex here),
+	 * keeping the last match to mirror the original reverse-iteration result. */
+	obs_source_t *ref = obs_source_get_ref(child);
+	if (ref) {
+		obs_source_release(*filter);
+		*filter = ref;
+	}
 }
 
 static void find_source_by_filter(obs_source_t *parent, obs_source_t *child, void *param)
@@ -2047,8 +2053,14 @@ static void find_source_by_filter(obs_source_t *parent, obs_source_t *child, voi
 	if (strcmp(obs_source_get_unversioned_id(child), "source_record_filter") != 0)
 		return;
 
+	/* N3: take a strong ref while the enumerator still guarantees `parent` is
+	 * alive; handlers use these pointers after enumeration and release them at
+	 * the end of the fan-out loop. */
+	obs_source_t *ref = obs_source_get_ref(parent);
+	if (!ref)
+		return;
 	DARRAY(obs_source_t *) *sources = param;
-	darray_push_back(sizeof(obs_source_t *), &sources->da, &parent);
+	darray_push_back(sizeof(obs_source_t *), &sources->da, &ref);
 }
 
 static bool find_source(void *data, obs_source_t *source)
@@ -2081,7 +2093,6 @@ obs_source_t *get_source_record_filter(obs_source_t *source, obs_data_t *request
 		}
 	} else {
 		obs_source_enum_filters(source, find_filter, &filter);
-		filter = obs_source_get_ref(filter);
 		if (!filter) {
 			if (!create) {
 				if (response_data)
@@ -2297,6 +2308,8 @@ static void websocket_start_record(obs_data_t *request_data, obs_data_t *respons
 		for (size_t i = 0; i < sources.num; i++) {
 			success = start_record_source(sources.array[i], request_data, response_data) && success;
 		}
+		for (size_t i = 0; i < sources.num; i++)
+			obs_source_release(sources.array[i]);
 		da_free(sources);
 	}
 	obs_data_set_bool(response_data, "success", success);
@@ -2328,6 +2341,8 @@ static void websocket_pause_record(obs_data_t *request_data, obs_data_t *respons
 		for (size_t i = 0; i < sources.num; i++) {
 			success = pause_record_source(sources.array[i], request_data, response_data) && success;
 		}
+		for (size_t i = 0; i < sources.num; i++)
+			obs_source_release(sources.array[i]);
 		da_free(sources);
 	}
 	obs_data_set_bool(response_data, "success", success);
@@ -2359,6 +2374,8 @@ static void websocket_unpause_record(obs_data_t *request_data, obs_data_t *respo
 		for (size_t i = 0; i < sources.num; i++) {
 			success = unpause_record_source(sources.array[i], request_data, response_data) && success;
 		}
+		for (size_t i = 0; i < sources.num; i++)
+			obs_source_release(sources.array[i]);
 		da_free(sources);
 	}
 	obs_data_set_bool(response_data, "success", success);
@@ -2390,6 +2407,8 @@ static void websocket_split_record(obs_data_t *request_data, obs_data_t *respons
 		for (size_t i = 0; i < sources.num; i++) {
 			success = split_record_source(sources.array[i], request_data, response_data) && success;
 		}
+		for (size_t i = 0; i < sources.num; i++)
+			obs_source_release(sources.array[i]);
 		da_free(sources);
 	}
 	obs_data_set_bool(response_data, "success", success);
@@ -2421,6 +2440,8 @@ static void websocket_add_chapter_record(obs_data_t *request_data, obs_data_t *r
 		for (size_t i = 0; i < sources.num; i++) {
 			success = add_chapter_record_source(sources.array[i], request_data, response_data) && success;
 		}
+		for (size_t i = 0; i < sources.num; i++)
+			obs_source_release(sources.array[i]);
 		da_free(sources);
 	}
 	obs_data_set_bool(response_data, "success", success);
@@ -2452,6 +2473,8 @@ static void websocket_stop_record(obs_data_t *request_data, obs_data_t *response
 		for (size_t i = 0; i < sources.num; i++) {
 			success = stop_record_source(sources.array[i], request_data, response_data) && success;
 		}
+		for (size_t i = 0; i < sources.num; i++)
+			obs_source_release(sources.array[i]);
 		da_free(sources);
 	}
 	obs_data_set_bool(response_data, "success", success);
@@ -2549,6 +2572,8 @@ static void websocket_start_replay_buffer(obs_data_t *request_data, obs_data_t *
 		for (size_t i = 0; i < sources.num; i++) {
 			success = start_replay_buffer_source(sources.array[i], request_data, response_data) && success;
 		}
+		for (size_t i = 0; i < sources.num; i++)
+			obs_source_release(sources.array[i]);
 		da_free(sources);
 	}
 	obs_data_set_bool(response_data, "success", success);
@@ -2580,6 +2605,8 @@ static void websocket_stop_replay_buffer(obs_data_t *request_data, obs_data_t *r
 		for (size_t i = 0; i < sources.num; i++) {
 			success = stop_replay_buffer_source(sources.array[i], request_data, response_data) && success;
 		}
+		for (size_t i = 0; i < sources.num; i++)
+			obs_source_release(sources.array[i]);
 		da_free(sources);
 	}
 	obs_data_set_bool(response_data, "success", success);
@@ -2611,6 +2638,8 @@ static void websocket_save_replay_buffer(obs_data_t *request_data, obs_data_t *r
 		for (size_t i = 0; i < sources.num; i++) {
 			success = save_replay_buffer_source(sources.array[i], request_data, response_data) && success;
 		}
+		for (size_t i = 0; i < sources.num; i++)
+			obs_source_release(sources.array[i]);
 		da_free(sources);
 	}
 	if (!success)
@@ -2686,6 +2715,8 @@ static void websocket_start_stream(obs_data_t *request_data, obs_data_t *respons
 		for (size_t i = 0; i < sources.num; i++) {
 			success = start_stream_source(sources.array[i], request_data, response_data) && success;
 		}
+		for (size_t i = 0; i < sources.num; i++)
+			obs_source_release(sources.array[i]);
 		da_free(sources);
 	}
 	obs_data_set_bool(response_data, "success", success);
@@ -2717,6 +2748,8 @@ static void websocket_stop_stream(obs_data_t *request_data, obs_data_t *response
 		for (size_t i = 0; i < sources.num; i++) {
 			success = stop_stream_source(sources.array[i], request_data, response_data) && success;
 		}
+		for (size_t i = 0; i < sources.num; i++)
+			obs_source_release(sources.array[i]);
 		da_free(sources);
 	}
 	obs_data_set_bool(response_data, "success", success);
