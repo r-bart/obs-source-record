@@ -490,6 +490,31 @@ static void ensure_directory(char *path)
 #endif
 }
 
+/* B8: if the generated recording path already exists, append " (n)" before the
+ * extension (matching OBS's own FindBestFilename), so two filters that generate
+ * the same one-second filename don't have the second truncate the first. */
+static void dedup_path(struct dstr *path, const char *ext)
+{
+	if (!path->array || !os_file_exists(path->array))
+		return;
+	size_t elen = ext ? strlen(ext) : 0;
+	size_t base_len = path->len;
+	if (elen && base_len > elen + 1 && path->array[base_len - elen - 1] == '.' &&
+	    strcmp(path->array + base_len - elen, ext) == 0)
+		base_len -= elen + 1;
+	struct dstr base = {0};
+	dstr_ncat(&base, path->array, base_len);
+	for (int n = 1; n < 10000; n++) {
+		if (elen)
+			dstr_printf(path, "%s (%d).%s", base.array, n, ext);
+		else
+			dstr_printf(path, "%s (%d)", base.array, n);
+		if (!os_file_exists(path->array))
+			break;
+	}
+	dstr_free(&base);
+}
+
 static void remove_filter(void *data, calldata_t *calldata)
 {
 	struct source_record_filter_context *filter = data;
@@ -636,6 +661,7 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 	dstr_printf(&path, "%s/%s", obs_data_get_string(settings, "path"), filename);
 	bfree(filename);
 	ensure_directory(path.array);
+	dedup_path(&path, GetFormatExt(format));
 	obs_data_set_string(s, "path", path.array);
 	dstr_free(&path);
 	obs_data_set_string(s, "directory", obs_data_get_string(settings, "path"));
