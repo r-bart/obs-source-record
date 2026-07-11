@@ -933,6 +933,33 @@ static void set_encoder_defaults(obs_data_t *settings)
 	}
 }
 
+/* N12: copy the user-set audio-encoder properties beyond bitrate (samplerate,
+ * "allow he-aac", ...) into the encoder settings. The UI exposes them but only
+ * "bitrate" was passed through, so they were shown yet never applied. */
+static void copy_audio_user_values(obs_data_t *from, obs_data_t *to, const char *enc_id)
+{
+	obs_data_t *defaults = obs_encoder_defaults(enc_id);
+	if (!defaults)
+		return;
+	for (obs_data_item_t *item = obs_data_first(defaults); item != NULL; obs_data_item_next(&item)) {
+		const char *name = obs_data_item_get_name(item);
+		if (strcmp(name, "bitrate") == 0 || !obs_data_has_user_value(from, name))
+			continue;
+		enum obs_data_type t = obs_data_item_gettype(item);
+		if (t == OBS_DATA_STRING) {
+			obs_data_set_string(to, name, obs_data_get_string(from, name));
+		} else if (t == OBS_DATA_NUMBER) {
+			if (obs_data_item_numtype(item) == OBS_DATA_NUM_INT)
+				obs_data_set_int(to, name, obs_data_get_int(from, name));
+			else
+				obs_data_set_double(to, name, obs_data_get_double(from, name));
+		} else if (t == OBS_DATA_BOOLEAN) {
+			obs_data_set_bool(to, name, obs_data_get_bool(from, name));
+		}
+	}
+	obs_data_release(defaults);
+}
+
 static void update_encoder(struct source_record_filter_context *filter, obs_data_t *settings)
 {
 	const char *enc_id = get_encoder_id(settings);
@@ -1036,6 +1063,7 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 		if (obs_data_has_user_value(settings, "audio_bitrate") || obs_data_has_default_value(settings, "audio_bitrate")) {
 			obs_data_set_int(audio_settings, "bitrate", obs_data_get_int(settings, "audio_bitrate"));
 		}
+		copy_audio_user_values(settings, audio_settings, enc_id); /* N12 */
 		if (audio_track > 0) {
 			filter->audioEncoder[0] = obs_audio_encoder_create(enc_id, obs_source_get_name(filter->source),
 									   audio_settings, audio_track - 1, NULL);
