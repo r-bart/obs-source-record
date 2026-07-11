@@ -888,6 +888,37 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 	filter->audio_track = audio_track;
 }
 
+/* Tolerant "WxH" parser: accepts x, X, *, or the UTF-8 multiplication sign
+ * U+00D7 as separator, with optional surrounding spaces. Returns false if it
+ * cannot read two numbers, so the caller can preserve the user's typed text. */
+static bool parse_resolution(const char *res, uint32_t *width, uint32_t *height)
+{
+	if (!res || !*res)
+		return false;
+	char *end = NULL;
+	unsigned long w = strtoul(res, &end, 10);
+	if (end == res)
+		return false;
+	while (*end == ' ' || *end == '\t')
+		end++;
+	if (*end == 'x' || *end == 'X' || *end == '*') {
+		end++;
+	} else if ((unsigned char)end[0] == 0xC3 && (unsigned char)end[1] == 0x97) {
+		end += 2; /* '×' (U+00D7) in UTF-8 */
+	} else {
+		return false;
+	}
+	while (*end == ' ' || *end == '\t')
+		end++;
+	const char *hstart = end;
+	unsigned long h = strtoul(hstart, &end, 10);
+	if (end == hstart)
+		return false;
+	*width = (uint32_t)w;
+	*height = (uint32_t)h;
+	return true;
+}
+
 static void source_record_filter_update(void *data, obs_data_t *settings)
 {
 	struct source_record_filter_context *filter = data;
@@ -898,17 +929,27 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 	}
 	if (obs_data_get_bool(settings, "scale")) {
 		const char *res = obs_data_get_string(settings, "resolution");
-		uint32_t width, height;
-		if (sscanf(res, "%dx%d", &width, &height) == 2 && width > 0 && height > 0) {
+		uint32_t width = 0, height = 0;
+		if (parse_resolution(res, &width, &height) && width > 0 && height > 0) {
 			obs_data_set_int(settings, "width", width);
 			obs_data_set_int(settings, "height", height);
 		} else {
-			struct dstr str;
-			dstr_init(&str);
-			dstr_printf(&str, "%dx%d", (int)obs_data_get_int(settings, "width"),
-				    (int)obs_data_get_int(settings, "height"));
-			obs_data_set_string(settings, "resolution", str.array);
-			dstr_free(&str);
+			/* Only rewrite "resolution" from an already-parsed
+			 * width/height (legacy config migration). If they are 0
+			 * (new filter, or unparseable text), keep the user's typed
+			 * value so it can be corrected, instead of clobbering it to
+			 * "0x0" and silently disabling scaling under a ticked box. */
+			int w = (int)obs_data_get_int(settings, "width");
+			int h = (int)obs_data_get_int(settings, "height");
+			if (w > 0 && h > 0) {
+				struct dstr str;
+				dstr_init(&str);
+				dstr_printf(&str, "%dx%d", w, h);
+				obs_data_set_string(settings, "resolution", str.array);
+				dstr_free(&str);
+			} else if (res && *res) {
+				blog(LOG_WARNING, "[Source Record] could not parse scale resolution '%s'", res);
+			}
 		}
 	}
 	filter->remove_after_record = obs_data_get_bool(settings, "remove_after_record");
