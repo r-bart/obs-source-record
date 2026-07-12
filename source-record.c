@@ -61,6 +61,11 @@ struct source_record_filter_context {
 	uint64_t next_start_attempt;
 	int start_failures;
 	bool max_seconds_reached;
+	/* Last recording path/format/filename applied to the live fileOutput, so a
+	 * change while recording can be detected and the output restarted. */
+	struct dstr rec_path;
+	struct dstr rec_format;
+	struct dstr rec_filename;
 };
 
 DARRAY(obs_source_t *) source_record_filters;
@@ -689,10 +694,27 @@ static void update_video_encoder(struct source_record_filter_context *filter, ob
 		obs_output_set_video_encoder(filter->replayOutput, filter->encoder);
 }
 
+/* True if the recording path, format or filename pattern differs from what the
+ * live fileOutput was started with (the cache is refreshed by start_file_output
+ * when the output is restarted). */
+static bool record_settings_changed(struct source_record_filter_context *filter, obs_data_t *settings)
+{
+	const char *path = obs_data_get_string(settings, "path");
+	const char *format = obs_data_get_string(settings, "rec_format");
+	const char *filename = obs_data_get_string(settings, "filename_formatting");
+	return dstr_cmp(&filter->rec_path, path) != 0 || dstr_cmp(&filter->rec_format, format) != 0 ||
+	       dstr_cmp(&filter->rec_filename, filename) != 0;
+}
+
 static void start_file_output(struct source_record_filter_context *filter, obs_data_t *settings)
 {
 	obs_data_t *s = obs_data_create();
 	const char *format = obs_data_get_string(settings, "rec_format");
+	/* Remember what this output is being started with, so a later path/format/
+	 * filename change while recording can be detected (see update). */
+	dstr_copy(&filter->rec_path, obs_data_get_string(settings, "path"));
+	dstr_copy(&filter->rec_format, format);
+	dstr_copy(&filter->rec_filename, obs_data_get_string(settings, "filename_formatting"));
 	/* Honour the profile's "no spaces in filenames" preference for both the
 	 * first file and the muxer's split files. The muxer defaults allow_spaces
 	 * to false, so without this every split file got its spaces turned into
@@ -1266,6 +1288,19 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 			}
 		}
 		filter->record = record;
+	} else if (record && filter->fileOutput && obs_source_enabled(filter->source) && !filter->closing &&
+		   record_settings_changed(filter, settings)) {
+		/* Apply a path/format/filename change to an already-running recording.
+		 * A live ffmpeg muxer can't change its file mid-write, so restart splits
+		 * the recording: the current file finalizes and a new one starts with the
+		 * new settings. Only fires while recording; an idle filter picks up new
+		 * settings on its next start. Mirrors the replay-duration restart below. */
+		blog(LOG_INFO,
+		     "[Source Record] recording path/format changed while active; restarting output (splits the file)");
+		queue_force_stop(filter, filter->fileOutput, true);
+		filter->fileOutput = NULL;
+		if (filter->video_output)
+			start_file_output(filter, settings);
 	}
 
 	if (record && filter->fileOutput && filter->last_frontend_event == OBS_FRONTEND_EVENT_RECORDING_PAUSED &&
@@ -1618,6 +1653,9 @@ static void source_record_filter_destroy(void *data)
 	}
 
 	context->source = NULL;
+	dstr_free(&context->rec_path);
+	dstr_free(&context->rec_format);
+	dstr_free(&context->rec_filename);
 	bfree(context);
 }
 
