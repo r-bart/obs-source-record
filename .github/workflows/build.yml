@@ -1,6 +1,10 @@
 name: build obs plugin
 
 on:
+  # Manual, on-demand builds (keeps Actions usage minimal: nothing runs on a
+  # normal push to develop -- trigger this from the Actions tab or
+  # `gh workflow run build.yml --ref develop` when you want fresh binaries).
+  workflow_dispatch:
   push:
     branches: [ master ]
   pull_request:
