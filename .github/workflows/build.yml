@@ -303,6 +303,11 @@ jobs:
           name: '${{ env.FILE_NAME }}-installer'
           path: package/*.exe
       - name: Remove temp artifacts
+        # Best-effort cleanup: the default GITHUB_TOKEN on a fork can't delete
+        # artifacts ("Resource not accessible by integration"). The installer is
+        # already uploaded above, so a failed cleanup must not fail the run.
+        continue-on-error: true
         uses: geekyeggo/delete-artifact@v4.1.0
         with:
           name: "${{ env.FILE_NAME_X86 }}\n${{ env.FILE_NAME_X64 }}"
+          failOnError: false
