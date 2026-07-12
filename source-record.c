@@ -56,6 +56,8 @@ struct source_record_filter_context {
 	bool remove_after_record;
 	long long record_max_seconds;
 	int last_frontend_event;
+	bool video_reset;
+	struct obs_video_info cached_ovi;
 };
 
 DARRAY(obs_source_t *) source_record_filters;
@@ -1190,6 +1192,16 @@ static void frontend_event(enum obs_frontend_event event, void *data)
 	}
 }
 
+/* B1: the core "video_reset" signal (OBS 31.1+) fires from obs_reset_video,
+ * which frees every private-view mix. Only flag it here (wrong thread to touch
+ * pointers); the graphics-thread tick drops the dangling video_output. */
+static void on_video_reset(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(cd);
+	struct source_record_filter_context *context = data;
+	context->video_reset = true;
+}
+
 static void *source_record_filter_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct source_record_filter_context *context = bzalloc(sizeof(struct source_record_filter_context));
@@ -1203,6 +1215,7 @@ static void *source_record_filter_create(obs_data_t *settings, obs_source_t *sou
 	context->chapterHotkey = OBS_INVALID_HOTKEY_ID;
 	source_record_filter_update(context, settings);
 	obs_frontend_add_event_callback(frontend_event, context);
+	signal_handler_connect(obs_get_signal_handler(), "video_reset", on_video_reset, context);
 	return context;
 }
 
@@ -1217,6 +1230,7 @@ static void source_record_filter_destroy(void *data)
 			obs_source_dec_showing(parent);
 		context->output_active = false;
 	}
+	signal_handler_disconnect(obs_get_signal_handler(), "video_reset", on_video_reset, context);
 	obs_frontend_remove_event_callback(frontend_event, context);
 
 	stop_output_sync(context, context->fileOutput);
@@ -1405,6 +1419,28 @@ static void source_record_filter_tick(void *data, float seconds)
 	width += (width & 1);
 	uint32_t height = obs_source_get_height(parent);
 	height += (height & 1);
+
+	/* B1: obs_reset_video frees every private-view mix, leaving video_output
+	 * dangling. On OBS <=31.0 (no "video_reset" signal) detect it by comparing
+	 * the global OVI; then drop the pointer so the branch below recreates the
+	 * mix. Do NOT obs_view_remove — the mix is already gone. */
+	if (!context->video_reset && context->video_output) {
+		struct obs_video_info ovi;
+		if (obs_get_video_info(&ovi) &&
+		    (ovi.fps_num != context->cached_ovi.fps_num || ovi.fps_den != context->cached_ovi.fps_den ||
+		     ovi.base_width != context->cached_ovi.base_width || ovi.base_height != context->cached_ovi.base_height ||
+		     ovi.output_width != context->cached_ovi.output_width ||
+		     ovi.output_height != context->cached_ovi.output_height ||
+		     ovi.output_format != context->cached_ovi.output_format ||
+		     ovi.colorspace != context->cached_ovi.colorspace || ovi.range != context->cached_ovi.range))
+			context->video_reset = true;
+	}
+	if (context->video_reset) {
+		context->video_reset = false;
+		context->video_output = NULL;
+		context->width = 0;
+		context->height = 0;
+	}
 	/* Fix: never destroy the video_output while an encoder is still feeding
 	 * from it. A size change on the parent (window capture / PipeWire on
 	 * focus change) used to call obs_view_remove() immediately, freeing the
@@ -1414,6 +1450,7 @@ static void source_record_filter_tick(void *data, float seconds)
 	if (width && height && !context->video_output) {
 		struct obs_video_info ovi = {0};
 		obs_get_video_info(&ovi);
+		context->cached_ovi = ovi;
 
 		ovi.base_width = width;
 		ovi.base_height = height;
@@ -1436,6 +1473,7 @@ static void source_record_filter_tick(void *data, float seconds)
 			/* outputs are down and the encoder is idle: safe to swap */
 			struct obs_video_info ovi = {0};
 			obs_get_video_info(&ovi);
+			context->cached_ovi = ovi;
 
 			ovi.base_width = width;
 			ovi.base_height = height;
@@ -1902,6 +1940,7 @@ static void source_record_filter_filter_remove(void *data, obs_source_t *parent)
 	stop_output_sync(context, context->fileOutput);
 	stop_output_sync(context, context->streamOutput);
 	stop_output_sync(context, context->replayOutput);
+	signal_handler_disconnect(obs_get_signal_handler(), "video_reset", on_video_reset, context);
 	obs_frontend_remove_event_callback(frontend_event, context);
 }
 
