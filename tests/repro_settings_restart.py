@@ -11,6 +11,8 @@ import os
 import struct
 import sys
 import time
+from pathlib import Path
+from media_checks import decode, stable
 
 from isolated_obs import connect, stop_owned, IsolationError
 
@@ -108,7 +110,9 @@ def main():
         ok = a_final and bool(b) and sum(gB) > 0
         print(f"VERDICT={'APPLIED' if ok else 'IGNORED'} (new file in B growing={ok})", flush=True)
         vendor(cl, "record_stop", {"source": SRC})
-        time.sleep(2)
+        stable([Path(a1), Path(b)])
+        decode(a1)
+        decode(b)
         return 0 if ok else 1
     finally:
         for fn in (lambda: cl.remove_input(SRC), lambda: cl.remove_scene(SCENE)):
@@ -116,9 +120,7 @@ def main():
                 fn()
             except Exception:
                 pass
-        import shutil
-        shutil.rmtree(dirA, ignore_errors=True)
-        shutil.rmtree(dirB, ignore_errors=True)
+        # The runner retains synthetic media and logs for diagnosis.
 
 
 if __name__ == "__main__":

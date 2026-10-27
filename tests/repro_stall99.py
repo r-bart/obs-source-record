@@ -223,8 +223,7 @@ def main():
                 cleanup(cl)
             except Exception:
                 pass
-        shutil.rmtree(tmp_v, ignore_errors=True)
-        shutil.rmtree(tmp_b, ignore_errors=True)
+        # The runner retains synthetic media and logs for diagnosis.
     return code
 
 

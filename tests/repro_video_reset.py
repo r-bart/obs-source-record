@@ -9,6 +9,8 @@ import logging
 import os
 import sys
 import time
+from pathlib import Path
+from media_checks import decode, stable, wait_for
 
 from isolated_obs import connect, stop_owned, IsolationError
 
@@ -37,7 +39,7 @@ def main():
     kinds = cl.get_input_kind_list(False).input_kinds
     ck = next((k for k in kinds if k.startswith("color_source")), "color_source_v3")
     cl.create_input(SCENE, SRC, ck, {"width": 640, "height": 360}, True)
-    cl.create_source_filter(SRC, "SR_F", "source_record_filter", {"path": tmp, "record_mode": 0})
+    cl.create_source_filter(SRC, "SR_F", "source_record_filter", {"path": tmp, "record_mode": 0, "rec_format": "mp4"})
     time.sleep(1.5)  # let the tick create the private view + mix
 
     vs = cl.get_video_settings()
@@ -51,18 +53,23 @@ def main():
         started = vendor(cl, "record_start", {"source": SRC})
         time.sleep(2)
         alive = cl.get_version().obs_version  # if OBS crashed this raises
-        rec = cl.get_record_status().output_active
-        print(f"B1: OBS alive after reset+record ({alive}); global record_active={rec}")
-        ok_b1 = bool(alive) and started.get("success") is True and any(
-            os.path.getsize(os.path.join(tmp, f)) > 0 for f in os.listdir(tmp))
+        assert started.get("success") is True, started
+        recorded = wait_for(lambda: list(Path(tmp).glob("*.mp4")), message="Source Record output after reset")
         vendor(cl, "record_stop", {"source": SRC})
-        time.sleep(1)
+        stable(recorded)
+        for path in recorded:
+            decode(path)
+        ok_b1 = bool(alive)
+        print(f"B1: OBS alive; private recording finalized and decoded ({alive})")
     finally:
         cl.set_video_settings(vs.fps_numerator, vs.fps_denominator, vs.base_width, vs.base_height, vs.output_width,
                               vs.output_height)
         print("video settings restored")
 
-    time.sleep(2.5)  # let the idle tick release SOURCE_CHANNEL (B14)
+    # This scene is not on program: after stopping the private view must no
+    # longer keep its input showing. Absence in GetInputList alone is insufficient.
+    wait_for(lambda: cl.send("GetSourceActive", {"sourceName": SRC}, raw=True).get("videoShowing") is False,
+             message="private view/showing reference released")
     cl.remove_input(SRC)
     time.sleep(1.5)
     names = [i["inputName"] for i in cl.get_input_list().inputs]

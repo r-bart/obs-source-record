@@ -24,6 +24,15 @@ def function(name, source=SOURCE):
     return source[start:pos]
 
 
+def audio_function():
+    try:
+        return function("update_audio_encoder")
+    except ValueError:
+        old = function("update_encoder")
+        audio = "static void legacy_audio(struct source_record_filter_context *filter, obs_data_t *settings) { const char *enc_id;\n" + old[old.index("\tconst int audio_track ="):]
+        return audio + "\nstatic void update_audio_encoder(struct source_record_filter_context *filter,obs_data_t *settings){legacy_audio(filter,settings);filter->owns_audio_output=filter->audio_track==0;}\n"
+
+
 PRELUDE = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -99,13 +108,7 @@ class CRegressions(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
 
     def test_audio_ownership_configuration_and_failure(self):
-        try:
-            audio = function("update_audio_encoder")
-        except ValueError:
-            # Run the old production audio block too, for a before/after check.
-            old = function("update_encoder")
-            audio = "static void legacy_audio(struct source_record_filter_context *filter, obs_data_t *settings) { const char *enc_id;\n" + old[old.index("\tconst int audio_track ="):]
-            audio += "\nstatic void update_audio_encoder(struct source_record_filter_context *filter,obs_data_t *settings){legacy_audio(filter,settings);filter->owns_audio_output=filter->audio_track==0;}\n"
+        audio = audio_function()
         self.run_c(PRELUDE + audio + r'''
 static void dispose(struct source_record_filter_context *c) {
  for(int i=0;i<6;i++) obs_encoder_release(c->audioEncoder[i]);
@@ -113,6 +116,10 @@ static void dispose(struct source_record_filter_context *c) {
  obs_data_release(c->applied_audio_settings);
 }
 int main(void) {
+ struct source_record_filter_context preflight={0};
+ obs_data_t initial={.different=true,.track=-1,.bitrate=128};strcpy(initial.id,"aac");
+ update_audio_encoder(&preflight,&initial);initial.track=0;update_audio_encoder(&preflight,&initial);
+ assert(preflight.audio_output!=&global_audio);dispose(&preflight);
  int modes[]={0,-1,1,6};
  for(int a=0;a<4;a++)for(int b=0;b<4;b++) {
   struct source_record_filter_context c={0};
@@ -382,6 +389,56 @@ int main(void){obs_source_t s={0,"audio"};obs_weak_source_t w={&s};
  assert(audio_source_matches(&w,"audio"));assert(!s.refs);
  assert(!audio_source_matches(&w,"different"));assert(!s.refs);
  w.source=NULL;assert(!audio_source_matches(&w,"audio"));puts("audio source reference PASS");}
+''')
+
+    def test_idle_audio_codec_and_bitrate_changes(self):
+        self.run_c(PRELUDE + audio_function() + r'''
+int main(void){struct source_record_filter_context c={0};obs_data_t s={.bitrate=96};strcpy(s.id,"aac");
+ update_audio_encoder(&c,&s);s.bitrate=192;strcpy(s.id,"opus");update_audio_encoder(&c,&s);
+ assert(!strcmp(c.audioEncoder[0]->id,"opus"));assert(c.audioEncoder[0]->bitrate==192);
+ obs_encoder_release(c.audioEncoder[0]);audio_output_close(c.audio_output);obs_data_release(c.applied_audio_settings);
+ assert(opens==closes);puts("idle codec and bitrate PASS");}
+''')
+
+    def test_audio_idle_callback_needs_no_published_device(self):
+        callback = function("audio_input_callback")
+        prefix = callback[:callback.index("\tobs_source_t *audio_source =")]
+        self.run_c(r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+#define UNUSED_PARAMETER(x) (void)(x)
+typedef void obs_source_t;
+struct audio_output_data {int unused;};
+struct source_record_filter_context {void *source,*audio_output;bool closing;};
+static bool os_atomic_load_bool(const volatile bool *v){return *v;}
+static int source_reads;
+static bool obs_source_removed(void *p){source_reads++;return false;}
+''' + prefix + "return false;\n}\n" + r'''
+int main(void){struct source_record_filter_context c={0};uint64_t out=0;
+ assert(audio_input_callback(&c,777,999,&out,0,NULL));assert(out==777&&source_reads==0);
+ assert(audio_input_callback(&c,888,999,&out,1,NULL));assert(out==888&&source_reads==0);
+ c.audio_output=&c;assert(!audio_input_callback(&c,0,999,&out,1,NULL));assert(source_reads==1);}
+''')
+
+    def test_frontend_callback_removal_is_idempotent(self):
+        self.run_c(r'''
+#include <assert.h>
+#include <stdbool.h>
+#define OBS_TASK_UI 1
+typedef void (*obs_task_t)(void *);
+struct source_record_filter_context {bool frontend_callback_registered,exiting;};
+static bool os_atomic_set_bool(volatile bool *v,bool n){bool old=*v;*v=n;return old;}
+static bool os_atomic_load_bool(const volatile bool *v){return *v;}
+static int removed,waits;
+static void remove_frontend_cb_task(void *v){removed++;}
+static bool obs_in_task_thread(int kind){return false;}
+static void obs_queue_task(int kind,obs_task_t fn,void *v,bool wait){assert(wait);waits++;fn(v);}
+''' + function("remove_frontend_cb") + r'''
+int main(void){struct source_record_filter_context c={.frontend_callback_registered=true};
+ remove_frontend_cb(&c);remove_frontend_cb(&c);assert(removed==1&&waits==1);
+ c.frontend_callback_registered=true;c.exiting=true;remove_frontend_cb(&c);assert(removed==2&&waits==1);}
 ''')
 
 

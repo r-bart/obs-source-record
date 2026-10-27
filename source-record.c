@@ -66,6 +66,7 @@ struct source_record_filter_context {
 	obs_weak_source_t *audio_source;
 	bool closing;
 	bool exiting;
+	volatile bool frontend_callback_registered;
 	long long replay_buffer_duration;
 	struct vec4 backgroundColor;
 	bool remove_after_record;
@@ -1008,7 +1009,7 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 		unobserve_output(filter, FILE_OUTPUT);
 		obs_output_release(filter->fileOutput);
 		filter->fileOutput = obs_output_create(output_id, obs_source_get_name(filter->source), s, NULL);
-		if (filter->remove_after_record) {
+		if (filter->fileOutput && filter->remove_after_record) {
 			signal_handler_t *sh = obs_output_get_signal_handler(filter->fileOutput);
 			signal_handler_connect(sh, "stop", remove_filter, filter);
 		}
@@ -1843,6 +1844,8 @@ static void remove_frontend_cb_task(void *data)
 
 static void remove_frontend_cb(struct source_record_filter_context *context)
 {
+	if (!os_atomic_set_bool(&context->frontend_callback_registered, false))
+		return;
 	/* wait=true rendezvouses so no in-flight frontend_event uses a freed
 	 * context; skip the hop while exiting (UI may be joining the destruction
 	 * thread during obs_shutdown -> deadlock) or if already on the UI thread. */
