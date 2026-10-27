@@ -47,7 +47,7 @@ PRELUDE = r'''
 #define blog(...) ((void)0)
 typedef struct audio { bool closed; int id; } audio_t;
 typedef struct settings { int track, bitrate; bool different; char id[32], json[80]; } obs_data_t;
-typedef struct encoder { bool active; char id[32]; audio_t *media; int bitrate, track; } obs_encoder_t;
+typedef struct encoder { bool active; char id[32],name[64]; audio_t *media; int bitrate, track; } obs_encoder_t;
 typedef struct output { obs_encoder_t *audio[6]; } obs_output_t;
 struct audio_output_info {const char *name; int speakers, samples_per_sec, format; void *input_param; void *input_callback;};
 struct source_record_filter_context {
@@ -86,7 +86,7 @@ static void audio_output_close(audio_t *a) {assert(a!=&global_audio);assert(!a->
 static bool obs_encoder_active(obs_encoder_t *e) {return e&&e->active;}
 static const char *obs_encoder_get_id(obs_encoder_t *e) {return e->id;}
 static obs_encoder_t *obs_audio_encoder_create(const char *id,const char *n,obs_data_t *s,int track,void *unused) {
- if(fail_encoder) return NULL; obs_encoder_t *e=calloc(1,sizeof(*e));strcpy(e->id,id);e->bitrate=s->bitrate;e->track=track;return e;
+ if(fail_encoder) return NULL; obs_encoder_t *e=calloc(1,sizeof(*e));strcpy(e->id,id);strcpy(e->name,n);e->bitrate=s->bitrate;e->track=track;return e;
 }
 static void obs_encoder_set_audio(obs_encoder_t *e,audio_t *a) {assert(!a->closed);e->media=a;}
 static void obs_encoder_release(obs_encoder_t *e) {if(e){assert(!e->active);free(e);}}
@@ -131,7 +131,10 @@ int main(void) {
   assert(c.audio_track==modes[b]);assert(c.owns_audio_output==(modes[b]==0));
   assert(c.audioEncoder[0]->media==c.audio_output);
   if(modes[b]) assert(c.audio_output==&global_audio);
-  if(modes[b]==-1) assert(c.audioEncoder[5]); else assert(!c.audioEncoder[1]);
+  if(modes[b]==-1) {
+   assert(c.audioEncoder[5]);
+   for(int i=0;i<6;i++){char name[64];snprintf(name,sizeof(name),"fixture track %d",i+1);assert(!strcmp(c.audioEncoder[i]->name,name));}
+  } else assert(!c.audioEncoder[1]);
   s.bitrate=256;strcpy(s.id,"opus");update_audio_encoder(&c,&s);
   assert(c.audioEncoder[0]->bitrate==256);assert(!strcmp(c.audioEncoder[0]->id,"opus"));
   c.audioEncoder[0]->active=true;s.track=modes[b]?0:-1;

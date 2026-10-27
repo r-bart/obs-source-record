@@ -1314,8 +1314,15 @@ static void update_audio_encoder(struct source_record_filter_context *filter, ob
 	obs_encoder_t *encoders[MAX_AUDIO_MIXES] = {0};
 	const int count = audio_track == -1 ? MAX_AUDIO_MIXES : 1;
 	for (int i = 0; i < count; i++) {
-		encoders[i] = obs_audio_encoder_create(enc_id, obs_source_get_name(filter->source), audio_settings,
+		struct dstr track_name = {0};
+		const char *name = obs_source_get_name(filter->source);
+		if (audio_track == -1) {
+			dstr_printf(&track_name, "%s track %d", name, i + 1);
+			name = track_name.array;
+		}
+		encoders[i] = obs_audio_encoder_create(enc_id, name, audio_settings,
 						     audio_track > 0 ? audio_track - 1 : i, NULL);
+		dstr_free(&track_name);
 		if (!encoders[i]) {
 			for (int j = 0; j < i; j++)
 				obs_encoder_release(encoders[j]);
