@@ -1871,6 +1871,7 @@ static void *source_record_filter_create(obs_data_t *settings, obs_source_t *sou
 	context->chapterHotkey = OBS_INVALID_HOTKEY_ID;
 	source_record_filter_update(context, settings);
 	obs_frontend_add_event_callback(frontend_event, context);
+	os_atomic_store_bool(&context->frontend_callback_registered, true);
 	signal_handler_connect(obs_get_signal_handler(), "video_reset", on_video_reset, context);
 	return context;
 }

@@ -422,23 +422,47 @@ int main(void){struct source_record_filter_context c={0};uint64_t out=0;
  c.audio_output=&c;assert(!audio_input_callback(&c,0,999,&out,1,NULL));assert(source_reads==1);}
 ''')
 
-    def test_frontend_callback_removal_is_idempotent(self):
+    def test_frontend_registration_and_removal_are_balanced(self):
         self.run_c(r'''
 #include <assert.h>
 #include <stdbool.h>
+#include <stdlib.h>
+#include <pthread.h>
 #define OBS_TASK_UI 1
+#define OBS_INVALID_HOTKEY_PAIR_ID 0
+#define OBS_INVALID_HOTKEY_ID 0
+#define bzalloc(n) calloc(1,n)
+#define da_push_back(a,p) do{(a).value=*(p);(a).num++;}while(0)
 typedef void (*obs_task_t)(void *);
-struct source_record_filter_context {bool frontend_callback_registered,exiting;};
+typedef void obs_data_t;
+typedef void obs_source_t;
+struct source_record_filter_context {
+ void *source,*weak_self;int last_frontend_event,enableHotkey,pauseHotkeys,splitHotkey,chapterHotkey;
+ bool frontend_callback_registered,exiting;
+};
+static struct {void *value;int num;} source_record_filters;
+static pthread_mutex_t filters_mutex=PTHREAD_MUTEX_INITIALIZER;
 static bool os_atomic_set_bool(volatile bool *v,bool n){bool old=*v;*v=n;return old;}
+static void os_atomic_store_bool(volatile bool *v,bool n){*v=n;}
 static bool os_atomic_load_bool(const volatile bool *v){return *v;}
-static int removed,waits;
-static void remove_frontend_cb_task(void *v){removed++;}
+static int registered,removed,connected,disconnected,waits;
+static void frontend_event(int event,void *data){}
+static void on_video_reset(void *data,void *cd){}
+static void *obs_get_signal_handler(void){return NULL;}
+static void signal_handler_connect(void *sh,const char *n,void(*fn)(void*,void*),void *d){connected++;}
+static void signal_handler_disconnect(void *sh,const char *n,void(*fn)(void*,void*),void *d){disconnected++;}
+static void obs_frontend_add_event_callback(void(*fn)(int,void*),void *d){registered++;}
+static void obs_frontend_remove_event_callback(void(*fn)(int,void*),void *d){removed++;}
+static void *obs_source_get_weak_source(void *s){return s;}
+static void source_record_filter_update(void *d,void *settings){}
 static bool obs_in_task_thread(int kind){return false;}
 static void obs_queue_task(int kind,obs_task_t fn,void *v,bool wait){assert(wait);waits++;fn(v);}
-''' + function("remove_frontend_cb") + r'''
-int main(void){struct source_record_filter_context c={.frontend_callback_registered=true};
- remove_frontend_cb(&c);remove_frontend_cb(&c);assert(removed==1&&waits==1);
- c.frontend_callback_registered=true;c.exiting=true;remove_frontend_cb(&c);assert(removed==2&&waits==1);}
+''' + "\n".join(function(n) for n in ("remove_frontend_cb_task", "remove_frontend_cb", "source_record_filter_create")) + r'''
+int main(void){struct source_record_filter_context *c=source_record_filter_create(NULL,(void*)42);
+ assert(c->frontend_callback_registered&&registered==1&&connected==1);
+ remove_frontend_cb(c);remove_frontend_cb(c);assert(removed==1&&disconnected==1&&waits==1);free(c);
+ c=source_record_filter_create(NULL,(void*)42);c->exiting=true;
+ remove_frontend_cb(c);assert(registered==2&&connected==2&&removed==2&&disconnected==2&&waits==1);free(c);}
 ''')
 
 
