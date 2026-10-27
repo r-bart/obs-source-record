@@ -322,6 +322,8 @@ int main(void) {
  c.output_active=true;source.showing=1;close_filter_showing(&c,&source);
  assert(c.closing&&!c.output_active&&!source.showing);
  close_filter_showing(&c,&source);stream.active=true;sync_output_active(&c);assert(!source.showing);
+ obs_output_t closed_output={.refs=1};c.fileOutput=&closed_output;queue_start(&c,&closed_output,FILE_OUTPUT);
+ assert(!c.outputs[FILE_OUTPUT].start&&!nu&&source.refs==1&&closed_output.refs==1);
  puts("outputs: stale start cancellation, independent backoff, drainage, idempotent stop, reset PASS");
 }
 ''')
@@ -430,10 +432,11 @@ int main(void){
  for(int i=0;i<3;i++){
   struct source_record_filter_context c={0};obs_data_t s={.bitrate=96};strcpy(s.id,"aac");
   update_audio_encoder(&c,&s);audio_t *old=c.audio_output;obs_encoder_t *encoder=c.audioEncoder[0];
-  obs_encoder_t video={0};c.encoder=&video;c.video_output=&c;video_updates=scale_updates=0;
+  obs_encoder_t video={0};obs_output_t replay={0};c.replayOutput=&replay;
+  c.encoder=&video;c.video_output=&c;video_updates=scale_updates=0;
   c.outputs[STREAM_OUTPUT].phase=phases[i];s.different=true;s.track=-1;s.bitrate=192;strcpy(s.id,"opus");
   update_audio_encoder(&c,&s);update_video_encoder(&c,&s);
-  assert(!video_updates&&!scale_updates);
+  assert(!video_updates&&!scale_updates&&replay.video==&video);
   assert(c.audio_settings_pending&&c.audio_output==old&&c.audioEncoder[0]==encoder&&!strcmp(encoder->id,"aac"));
   c.outputs[STREAM_OUTPUT].phase=OUTPUT_FAILED;c.pending_stops=1;update_audio_encoder(&c,&s);
   assert(c.audio_output==old&&c.audioEncoder[0]==encoder);
@@ -490,7 +493,7 @@ static pthread_mutex_t filters_mutex=PTHREAD_MUTEX_INITIALIZER;
 static bool os_atomic_set_bool(volatile bool *v,bool n){bool old=*v;*v=n;return old;}
 static void os_atomic_store_bool(volatile bool *v,bool n){*v=n;}
 static bool os_atomic_load_bool(const volatile bool *v){return *v;}
-static int registered,removed,connected,disconnected,waits;
+static int registered,removed,connected,disconnected,waits,initial_updates,deferred_updates;
 static void frontend_event(int event,void *data){}
 static void on_video_reset(void *data,void *cd){}
 static void *obs_get_signal_handler(void){return NULL;}
@@ -499,12 +502,14 @@ static void signal_handler_disconnect(void *sh,const char *n,void(*fn)(void*,voi
 static void obs_frontend_add_event_callback(void(*fn)(int,void*),void *d){registered++;}
 static void obs_frontend_remove_event_callback(void(*fn)(int,void*),void *d){removed++;}
 static void *obs_source_get_weak_source(void *s){return s;}
-static void source_record_filter_update(void *d,void *settings){}
+static void source_record_filter_update(void *d,void *settings){initial_updates++;}
+static void obs_source_update(void *s,void *settings){assert(s==(void*)42);deferred_updates++;}
 static bool obs_in_task_thread(int kind){return false;}
 static void obs_queue_task(int kind,obs_task_t fn,void *v,bool wait){assert(wait);waits++;fn(v);}
-''' + "\n".join(function(n) for n in ("remove_frontend_cb_task", "remove_frontend_cb", "source_record_filter_create")) + r'''
+''' + "\n".join(function(n) for n in ("remove_frontend_cb_task", "remove_frontend_cb", "source_record_filter_create", "source_record_filter_load")) + r'''
 int main(void){struct source_record_filter_context *c=source_record_filter_create(NULL,(void*)42);
  assert(c->frontend_callback_registered&&registered==1&&connected==1);
+ source_record_filter_load(c,NULL);assert(initial_updates==1&&deferred_updates==1);
  remove_frontend_cb(c);remove_frontend_cb(c);assert(removed==1&&disconnected==1&&waits==1);free(c);
  c=source_record_filter_create(NULL,(void*)42);c->exiting=true;
  remove_frontend_cb(c);assert(registered==2&&connected==2&&removed==2&&disconnected==2&&waits==1);free(c);}

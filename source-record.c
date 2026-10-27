@@ -590,7 +590,7 @@ static void queue_start(struct source_record_filter_context *context, obs_output
 		return;
 	}
 	pthread_mutex_lock(&start_tasks_mutex);
-	if (context->outputs[kind].start || obs_output_active(output)) {
+	if (os_atomic_load_bool(&context->closing) || context->outputs[kind].start || obs_output_active(output)) {
 		pthread_mutex_unlock(&start_tasks_mutex);
 		return;
 	}
@@ -906,15 +906,13 @@ static bool (*obs_encoder_set_frame_rate_divisor_func)(obs_encoder_t *, uint32_t
 
 static void update_video_encoder(struct source_record_filter_context *filter, obs_data_t *settings)
 {
-	if (encoders_busy(filter))
-		return;
 	/* B5: never release/recreate an active encoder here. obs_encoder_video()
 	 * compares against the fps_override wrapper, so with frame_rate_divisor>=2
 	 * it never equals filter->video_output and the old code recreated a live
 	 * encoder -> double-encoding. When active, media already equals
 	 * video_output (it is never swapped under an active encoder), so only
 	 * (re-)point and reconfigure while idle. */
-	if (!obs_encoder_active(filter->encoder)) {
+	if (!encoders_busy(filter) && !obs_encoder_active(filter->encoder)) {
 		obs_encoder_set_video(filter->encoder, filter->video_output);
 		uint32_t divisor = (uint32_t)obs_data_get_int(settings, "frame_rate_divisor");
 		if (obs_encoder_set_frame_rate_divisor_func)
@@ -1748,6 +1746,13 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 		obs_weak_source_release(filter->audio_source);
 		filter->audio_source = NULL;
 	}
+}
+
+static void source_record_filter_load(void *data, obs_data_t *settings)
+{
+	struct source_record_filter_context *context = data;
+	/* Loading can run on UI. libobs defers this video source's update to graphics. */
+	obs_source_update(context->source, settings);
 }
 
 static void source_record_filter_save(void *data, obs_data_t *settings)
@@ -2661,7 +2666,7 @@ struct obs_source_info source_record_filter_info = {
 	.create = source_record_filter_create,
 	.destroy = source_record_filter_destroy,
 	.update = source_record_filter_update,
-	.load = source_record_filter_update,
+	.load = source_record_filter_load,
 	.save = source_record_filter_save,
 	.get_defaults = source_record_filter_defaults,
 	.video_tick = source_record_filter_tick,
