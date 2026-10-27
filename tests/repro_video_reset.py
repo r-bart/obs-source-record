@@ -71,9 +71,12 @@ def main():
     wait_for(lambda: cl.send("GetSourceActive", {"sourceName": SRC}, raw=True).get("videoShowing") is False,
              message="private view/showing reference released")
     cl.remove_input(SRC)
-    time.sleep(1.5)
-    names = [i["inputName"] for i in cl.get_input_list().inputs]
-    ok_b14 = SRC not in names
+    # An inactive scene prunes removed items when rendered. Release the fixture's
+    # own scene reference before attributing any retained input to the plugin.
+    cl.remove_scene(SCENE)
+    wait_for(lambda: SRC not in [i["inputName"] for i in cl.get_input_list().inputs],
+             message="input released after scene cleanup")
+    ok_b14 = True
     print(f"B14: source removed cleanly, no ghost = {ok_b14}")
     try:
         cl.remove_scene(SCENE)

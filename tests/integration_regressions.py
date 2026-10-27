@@ -5,9 +5,11 @@ import math
 import os
 from pathlib import Path
 import subprocess
+import socket
 import time
+import sys
 
-from isolated_obs import connect, verify_instance
+from isolated_obs import connect, verify_instance, IsolationError
 
 
 from media_checks import decode, probe, stable, wait_for
@@ -131,18 +133,45 @@ def main():
     settings("SPLIT_B", {"record_mode": 1})
     time.sleep(8)
     vendor("record_stop", {})
-    paths = files(d, 6)
+    paths = wait_for(lambda: (fs if len(fs := list(d.glob("*.mp4"))) >= 6 else None), message="split segments")
     stable(paths)
     assert len({p.name.split("[sr-")[1].split("]")[0] for p in paths}) == 2
     for path in paths:
-        decode(path)
+        decode(path, minimum_duration=0)
     remove("SPLIT_A")
     remove("SPLIT_B")
     print("PASS H6: concurrent split sessions stay in separate namespaces", flush=True)
+
+    # H5: a failed RTMP connection must retry independently of a healthy file.
+    d = root / "partial-failure"
+    with socket.socket() as unused:
+        unused.bind(("127.0.0.1", 0))
+        refused_port = unused.getsockname()[1]
+    add("HEALTHY", d, record_mode=1, filename_formatting="healthy")
+    paths = files(d)
+    before = paths[0].stat().st_size
+    add("FAILED_STREAM", root / "stream", stream_mode=1,
+        server=f"rtmp://127.0.0.1:{refused_port}/live", key="synthetic-test-only")
+    time.sleep(8)
+    assert paths[0].stat().st_size > before, "failed stream stalled healthy recording"
+    log = (root / "obs.log").read_text()
+    attempts = log.count(f"Connecting to RTMP URL rtmp://127.0.0.1:{refused_port}/live")
+    assert 2 <= attempts <= 5, f"unexpected retry/backoff count: {attempts}"
+    vendor("stream_stop", {"source": "SR_MEDIA", "filter": "FAILED_STREAM"})
+    vendor("record_stop", {"source": "SR_MEDIA", "filter": "HEALTHY"})
+    stable(paths)
+    decode(paths[0])
+    remove("FAILED_STREAM")
+    remove("HEALTHY")
+    print("PASS H5: failed stream retries independently while healthy recording grows", flush=True)
 
     request("RemoveInput", {"inputName": "SR_MEDIA"})
     print("PASS: real OBS integration finished", flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except IsolationError as error:
+        print(f"ABORT: {error}", file=sys.stderr)
+        sys.exit(2)

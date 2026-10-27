@@ -56,7 +56,7 @@ class IsolationTests(unittest.TestCase):
 
     def test_scripts_refuse_attach_without_runner(self):
         env = dict(os.environ, SR_TEST_MANIFEST="/nonexistent/sr-instance.json")
-        for name in ("smoke_websocket.py", "repro_stall99.py", "repro_settings_restart.py", "repro_video_reset.py"):
+        for name in ("smoke_websocket.py", "repro_stall99.py", "repro_settings_restart.py", "repro_video_reset.py", "integration_regressions.py"):
             with self.subTest(script=name):
                 result = subprocess.run([sys.executable, str(Path(__file__).parent/name)], env=env,
                                         capture_output=True, text=True, timeout=10)

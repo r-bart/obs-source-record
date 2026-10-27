@@ -20,12 +20,13 @@ def probe(path):
     return json.loads(result.stdout)
 
 
-def decode(path):
-    subprocess.run(["ffmpeg", "-v", "error", "-xerror", "-i", str(path), "-f", "null", "-"],
-                   check=True, capture_output=True, timeout=30)
+def decode(path, minimum_duration=.3):
+    result = subprocess.run(["ffmpeg", "-v", "error", "-xerror", "-i", str(path), "-f", "null", "-"],
+                            capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
     info = probe(path)
     assert any(s["codec_type"] == "video" for s in info["streams"]), path
-    assert float(info["format"]["duration"]) > .3, path
+    assert float(info["format"]["duration"]) > minimum_duration, path
     return info
 
 
