@@ -1,0 +1,68 @@
+name: Regression tests
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      integration:
+        description: Run disposable OBS integration on this hosted runner
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Production C regressions with ASan and UBSan; isolation refusal tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Check package version alignment
+        run: python3 tests/check_compile.py
+      - name: Download pinned OBS headers
+        run: |
+          curl --fail --location https://codeload.github.com/obsproject/obs-studio/tar.gz/refs/tags/31.1.2 -o /tmp/obs.tar.gz
+          tar -xzf /tmp/obs.tar.gz -C /tmp
+      - name: Compile complete plugin against pinned OBS API
+        run: python3 tests/check_compile.py /tmp/obs-studio-31.1.2
+  integration:
+    if: (github.event_name == 'workflow_dispatch' && inputs.integration) || github.ref == 'refs/heads/codex/fork-hardening'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install disposable OBS and software rendering dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y obs-studio libobs-dev ffmpeg xvfb libgl1-mesa-dri
+          python3 -m pip install -r tests/requirements.txt
+      - name: Build test plugin against runner OBS
+        run: |
+          mkdir -p /tmp/sr-plugin
+          python3 -c 'import pathlib,re; v=re.search(r"VERSION ([0-9.]+)",pathlib.Path("CMakeLists.txt").read_text())[1]; pathlib.Path("/tmp/sr-plugin/version.h").write_text("#define PROJECT_VERSION \""+v+"\"\n")'
+          cc -shared -fPIC -g -Wall -Wextra -Wno-unused-parameter -I/tmp/sr-plugin $(pkg-config --cflags libobs) source-record.c -o /tmp/sr-plugin/source-record.so $(pkg-config --libs libobs) -lobs-frontend-api
+          obs --version
+          sha256sum /tmp/sr-plugin/source-record.so
+      - name: Real OBS regressions in isolated processes
+        env:
+          SR_TEST_PLUGIN: /tmp/sr-plugin/source-record.so
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          QT_X11_NO_MITSHM: '1'
+        run: |
+          xvfb-run -a python3 tests/isolated_obs.py /usr/bin/obs tests/integration_regressions.py
+          xvfb-run -a python3 tests/isolated_obs.py /usr/bin/obs tests/repro_stall99.py
+          xvfb-run -a python3 tests/isolated_obs.py /usr/bin/obs tests/repro_settings_restart.py
+          xvfb-run -a python3 tests/isolated_obs.py /usr/bin/obs tests/repro_video_reset.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: isolated-obs-regressions
+          path: /tmp/source-record-test-*/
+          retention-days: 7
