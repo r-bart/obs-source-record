@@ -1,30 +1,9 @@
 #!/usr/bin/env python3
-"""Regression test for issue #99: a Source Record recording must NOT stall when a
-second Source Record output starts/stops, and OBS must shut down cleanly.
+"""Regression against a runner-owned, disposable OBS only.
 
-Replays the churn sequence from the 2026-07-11 stall logs: a victim filter
-records a color source, then a throwaway 2nd filter runs
-replay_buffer_start -> stop -> record_start -> record_stop and is deleted. The
-victim must keep growing across every churn and finalize a playable mp4 (moov).
-
-Two failure arms of #99 are checked:
-  * graphics-thread freeze  -> victim file stops growing (asserted always);
-  * destruction-thread hang -> OBS shutdown never completes. This only surfaces
-    at shutdown, so it is checked in --manage-obs mode, where this script owns
-    the OBS process and asserts it exits within a timeout. Over an attached
-    (externally launched) OBS the shutdown arm cannot be observed and is
-    reported as SKIPPED rather than silently passed.
-
-Exit codes (0 = pass, standard CI semantics):
-  0  PASS   — healthy across churns, moov finalized, clean shutdown (or shutdown SKIPPED in attach mode)
-  1  FAIL   — stall reproduced (victim stopped growing)
-  2  ABORT  — setup/precondition failure
-  3  FAIL   — victim never finalized (no moov)
-  4  FAIL   — OBS shutdown hung (destruction-thread arm)
-
-Connection via env: OBS_WS_HOST (localhost), OBS_WS_PORT (4455), OBS_WS_PASSWORD.
-Managed mode: SR_MANAGE_OBS=1 (or --manage-obs); OBS_APP_PATH overrides the app
-bundle (default /Applications/OBS.app). Records into $TMPDIR (cleaned up on exit).
+Launch through tests/isolated_obs.py on a dedicated Linux runner/VM.
+Ambient OBS_WS_* credentials and attach-to-existing-OBS are not supported.
+The current user's OBS must never be used as a target.
 """
 import glob
 import logging
@@ -36,19 +15,14 @@ import subprocess
 import sys
 import time
 
-import obsws_python as obs
+from isolated_obs import connect, stop_owned, IsolationError
 
 logging.getLogger("obsws_python").setLevel(logging.CRITICAL)  # quiet caught request errors
 
-HOST = os.environ.get("OBS_WS_HOST", "localhost")
-PORT = int(os.environ.get("OBS_WS_PORT", "4455"))
-PW = os.environ.get("OBS_WS_PASSWORD", "")
 VENDOR = "source-record"
 SUF = str(os.getpid())
 V_SCENE, V_SRC, V_FILT = f"V99_SC_{SUF}", f"V99_SRC_{SUF}", "V99_FILTER"
 CHURNS = int(os.environ.get("SR_CHURNS", "3"))
-MANAGE_OBS = os.environ.get("SR_MANAGE_OBS") == "1" or "--manage-obs" in sys.argv
-OBS_APP = os.environ.get("OBS_APP_PATH", "/Applications/OBS.app")
 SHUTDOWN_TIMEOUT = int(os.environ.get("SR_SHUTDOWN_TIMEOUT", "30"))
 
 # Exit codes
@@ -100,33 +74,6 @@ def growth(d, seconds, step=2.0):
         deltas.append(cur - prev)
         prev = cur
     return deltas
-
-
-def wait_ws(timeout):
-    """Wait for the websocket to accept a connection; return a client or None."""
-    import socket
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        s = socket.socket()
-        s.settimeout(1)
-        try:
-            s.connect((HOST, PORT))
-            s.close()
-            return obs.ReqClient(host=HOST, port=PORT, password=PW, timeout=5)
-        except Exception:
-            time.sleep(1)
-        finally:
-            s.close()
-    return None
-
-
-def launch_obs():
-    """Launch OBS directly so we own the PID; return the Popen handle."""
-    binary = os.path.join(OBS_APP, "Contents/MacOS/OBS")
-    if not os.path.exists(binary):
-        return None
-    # cwd must be the MacOS dir for OBS to find its data relative paths
-    return subprocess.Popen([binary, "--disable-shutdown-check"], cwd=os.path.dirname(binary))
 
 
 def churn(cl, i, tmp_b):
@@ -183,21 +130,9 @@ def cleanup(cl):
 def assert_clean_shutdown(cl, proc):
     """Managed mode: quit OBS and assert it exits within SHUTDOWN_TIMEOUT.
     Returns (verdict_str, exit_code)."""
-    # graceful quit like a user would; falls back to SIGTERM
-    subprocess.run(["osascript", "-e", 'tell application "OBS" to quit'],
-                   capture_output=True, timeout=10)
-    try:
-        proc.wait(timeout=SHUTDOWN_TIMEOUT)
-        print(f"SHUTDOWN=CLEAN in <= {SHUTDOWN_TIMEOUT}s (rc={proc.returncode})", flush=True)
+    if stop_owned(SHUTDOWN_TIMEOUT):
         return "CLEAN", PASS
-    except subprocess.TimeoutExpired:
-        print(f"SHUTDOWN=HANG (OBS still alive after {SHUTDOWN_TIMEOUT}s) — destruction-thread arm", flush=True)
-        try:
-            proc.send_signal(signal.SIGKILL)
-            proc.wait(timeout=10)
-        except Exception:
-            subprocess.run(["killall", "-9", "OBS"], capture_output=True)
-        return "HANG", FAIL_SHUTDOWN_HANG
+    return "HANG", FAIL_SHUTDOWN_HANG
 
 
 def run(cl, tmp_v, tmp_b, proc):
@@ -265,9 +200,6 @@ def run(cl, tmp_v, tmp_b, proc):
 
 
 def main():
-    if not PW:
-        print("OBS_WS_PASSWORD not set", file=sys.stderr)
-        return ABORT
 
     tmp_v = os.path.join(os.environ.get("TMPDIR", "/tmp"), f"sr99_v_{SUF}")
     tmp_b = os.path.join(os.environ.get("TMPDIR", "/tmp"), f"sr99_b_{SUF}")
@@ -278,15 +210,8 @@ def main():
     cl = None
     code = ABORT
     try:
-        if MANAGE_OBS:
-            proc = launch_obs()
-            if proc is None:
-                print(f"RESULT: OBS binary not found under {OBS_APP} — abort", flush=True)
-                return ABORT
-            print(f"Launched OBS pid={proc.pid}; waiting for websocket...", flush=True)
-            cl = wait_ws(90)
-        else:
-            cl = wait_ws(10)
+        cl = connect()
+        proc = True  # the dedicated runner owns and authenticates the process
         if cl is None:
             print("RESULT: websocket never came up — abort", flush=True)
             return ABORT
@@ -298,17 +223,14 @@ def main():
                 cleanup(cl)
             except Exception:
                 pass
-        # if we own OBS and did not already quit it (non-managed run path), leave it;
-        # managed run quits inside assert_clean_shutdown. Kill a still-alive managed proc.
-        if proc is not None and proc.poll() is None:
-            try:
-                proc.send_signal(signal.SIGKILL)
-            except Exception:
-                pass
         shutil.rmtree(tmp_v, ignore_errors=True)
         shutil.rmtree(tmp_b, ignore_errors=True)
     return code
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except IsolationError as error:
+        print(f"ABORT: {error}", file=sys.stderr)
+        sys.exit(2)

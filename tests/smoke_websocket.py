@@ -1,27 +1,19 @@
 #!/usr/bin/env python3
-"""Smoke tests for the Source Record obs-websocket vendor API.
+"""Regression against a runner-owned, disposable OBS only.
 
-Validates the Phase 2/3 fixes that touch websocket paths, by driving the
-`source-record` vendor requests and inspecting filter state — no manual clicks.
-
-Connection via env: OBS_WS_HOST (default localhost), OBS_WS_PORT (4455),
-OBS_WS_PASSWORD. Creates a throwaway scene + color source and removes it at the
-end, so it does not touch your real scene collection.
-
-Run:  OBS_WS_PASSWORD=... python tests/smoke_websocket.py
+Launch through tests/isolated_obs.py on a dedicated Linux runner/VM.
+Ambient OBS_WS_* credentials and attach-to-existing-OBS are not supported.
+The current user's OBS must never be used as a target.
 """
 import logging
 import os
 import sys
 import time
 
-import obsws_python as obs
+from isolated_obs import connect, stop_owned, IsolationError
 
 logging.getLogger("obsws_python").setLevel(logging.CRITICAL)  # quiet caught request errors
 
-HOST = os.environ.get("OBS_WS_HOST", "localhost")
-PORT = int(os.environ.get("OBS_WS_PORT", "4455"))
-PASSWORD = os.environ.get("OBS_WS_PASSWORD", "")
 
 # Unique per run: the plugin (B14, not yet fixed) retains the parent source via
 # its private view after recording, so RemoveInput leaves a ghost. Unique names
@@ -92,10 +84,7 @@ def teardown(cl):
 
 
 def main():
-    if not PASSWORD:
-        print("OBS_WS_PASSWORD not set", file=sys.stderr)
-        return 2
-    cl = obs.ReqClient(host=HOST, port=PORT, password=PASSWORD, timeout=5)
+    cl = connect()
     v = cl.get_version()
     print(f"Connected: OBS {v.obs_version}, ws {v.obs_web_socket_version}\n")
 
@@ -158,4 +147,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except IsolationError as error:
+        print(f"ABORT: {error}", file=sys.stderr)
+        sys.exit(2)
