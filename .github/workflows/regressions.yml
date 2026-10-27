@@ -13,6 +13,7 @@ permissions:
   contents: read
 jobs:
   unit:
+    timeout-minutes: 5
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -39,9 +40,10 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install disposable OBS and software rendering dependencies
+        timeout-minutes: 3
         run: |
-          sudo apt-get update
-          sudo apt-get install -y obs-studio libobs-dev ffmpeg xvfb libgl1-mesa-dri
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Dpkg::Lock::Timeout=60 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y obs-studio libobs-dev ffmpeg xvfb libgl1-mesa-dri
           python3 -m pip install -r tests/requirements.txt
       - name: Build test plugin against runner OBS
         run: |

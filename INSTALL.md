@@ -39,7 +39,8 @@ git tag -a v0.5.x -m "source-record 0.5.x" && git push fork v0.5.x
 ```
 
 After all platform builds pass, the workflow publishes the GitHub Release.
-The regression workflow also runs on pushes and pull requests. It does not install
+The regression workflow also runs on pushes and pull requests. Version and
+regression checks must pass before the release workflow builds its installers. It does not install
 or update your running OBS. Existing release assets are never overwritten by a retry.
 
 Ad-hoc / on-demand binaries without a release: `gh workflow run build.yml --repo

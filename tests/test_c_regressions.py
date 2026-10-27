@@ -101,9 +101,9 @@ class CRegressions(unittest.TestCase):
             source.write_text(code)
             build = subprocess.run([os.environ.get("CC", "clang"), "-std=c11", "-g", "-O1",
                 "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-pthread", str(source), "-o", str(binary)],
-                capture_output=True, text=True)
+                capture_output=True, text=True, timeout=30)
             self.assertEqual(build.returncode, 0, build.stderr)
-            result = subprocess.run([str(binary)], capture_output=True, text=True,
+            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30,
                                     env=dict(os.environ, ASAN_OPTIONS="detect_leaks=1" if os.name != "nt" and __import__('sys').platform != 'darwin' else "detect_leaks=0"))
             self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
 

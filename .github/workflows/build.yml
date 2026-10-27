@@ -16,7 +16,19 @@ env:
   PLUGIN_NAME: source-record
   OBS_VERSION: 29.0.0-beta1
 jobs:
+  checks:
+    name: Regression and version checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 tests/check_compile.py
+      - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
   macos:
+    needs: [checks]
     name: macOS
     runs-on: macos-latest
     strategy:
@@ -134,6 +146,7 @@ jobs:
           name: ${{ env.PLUGIN_NAME }}-macos-${{ matrix.arch }}-${{ steps.setup.outputs.commitHash }}
           path: ${{ github.workspace }}/plugin/release/${{ env.PLUGIN_NAME }}-*-macos-${{ matrix.arch }}.pkg
   linux-in-tree:
+    needs: [checks]
     name: 'Linux'
     runs-on: ${{ matrix.ubuntu }}
     strategy:
@@ -183,6 +196,7 @@ jobs:
           name: '${{ env.FILE_NAME }}'
           path: '*.tar.gz'
   windows-build:
+    needs: [checks]
     name: 'Windows Build'
     runs-on: [windows-2022]
     strategy:
