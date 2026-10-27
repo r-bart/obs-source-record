@@ -2,7 +2,7 @@
 
 Fecha: 2026-10-27
 Base investigada: `develop`, `25d3168`, versión 0.5.0.
-Estado: propuesto; implementación y pruebas pendientes.
+Estado: implementación y revisión final cerradas; CI del commit `a3a770b` con pruebas unitarias y OBS software/Linux en verde. Ver [evidencia y límites](../notes/2026-10-27_hardening-execution.md). Integración de macOS/Windows y hardware pendiente.
 Referencia: [investigación profunda](../research/2026-10-27_fork-0.5.0-deep.md).
 
 ## Objetivo y límites
