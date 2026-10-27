@@ -26,7 +26,11 @@ def function(name, source=SOURCE):
 
 def audio_function():
     try:
-        return function("update_audio_encoder")
+        try:
+            busy = function("encoders_busy")
+        except ValueError:
+            busy = ""
+        return busy + "\n" + function("update_audio_encoder")
     except ValueError:
         old = function("update_encoder")
         audio = "static void legacy_audio(struct source_record_filter_context *filter, obs_data_t *settings) { const char *enc_id;\n" + old[old.index("\tconst int audio_track ="):]
@@ -48,13 +52,17 @@ PRELUDE = r'''
 typedef struct audio { bool closed; int id; } audio_t;
 typedef struct settings { int track, bitrate; bool different; char id[32], json[80]; } obs_data_t;
 typedef struct encoder { bool active; char id[32],name[64]; audio_t *media; int bitrate, track; } obs_encoder_t;
-typedef struct output { obs_encoder_t *audio[6]; } obs_output_t;
+typedef struct output { obs_encoder_t *audio[6],*video; bool active; } obs_output_t;
+enum output_kind {FILE_OUTPUT,STREAM_OUTPUT,REPLAY_OUTPUT,OUTPUT_COUNT};
+enum output_phase {OUTPUT_IDLE,OUTPUT_QUEUED,OUTPUT_STARTING,OUTPUT_ACTIVE,OUTPUT_FAILED,OUTPUT_STOPPING};
+struct output_state {volatile long phase;};
 struct audio_output_info {const char *name; int speakers, samples_per_sec, format; void *input_param; void *input_callback;};
 struct source_record_filter_context {
- void *source; obs_encoder_t *audioEncoder[6]; int audio_track;
+ void *source,*video_output; obs_encoder_t *audioEncoder[6]; int audio_track;
  audio_t *audio_output; bool owns_audio_output, audio_settings_pending, closing;
  obs_data_t *applied_audio_settings;
  obs_output_t *fileOutput, *replayOutput, *streamOutput;
+ obs_encoder_t *encoder;struct output_state outputs[OUTPUT_COUNT];volatile long pending_stops;
 };
 struct dstr { char array[256]; };
 static void dstr_init(struct dstr *s) {s->array[0]=0;}
@@ -63,6 +71,8 @@ static void dstr_free(struct dstr *s) {}
 static bool obs_data_has_user_value(obs_data_t *s,const char *k) {return true;}
 static bool obs_data_has_default_value(obs_data_t *s,const char *k) {return true;}
 static bool os_atomic_load_bool(const volatile bool *v){return *v;}
+static long os_atomic_load_long(const volatile long *v){return *v;}
+static bool obs_output_active(obs_output_t *o){return o&&o->active;}
 static audio_t global_audio={0,99};
 static int closes, opens, fail_open, fail_encoder;
 static const char *obs_source_get_name(void *s) {return "fixture";}
@@ -91,6 +101,15 @@ static obs_encoder_t *obs_audio_encoder_create(const char *id,const char *n,obs_
 static void obs_encoder_set_audio(obs_encoder_t *e,audio_t *a) {assert(!a->closed);e->media=a;}
 static void obs_encoder_release(obs_encoder_t *e) {if(e){assert(!e->active);free(e);}}
 static void obs_output_set_audio_encoder(obs_output_t *o,obs_encoder_t *e,int i) {o->audio[i]=e;}
+static obs_encoder_t *obs_output_get_video_encoder(obs_output_t *o){return o->video;}
+static void obs_output_set_video_encoder(obs_output_t *o,obs_encoder_t *e){o->video=e;}
+enum obs_scale_type {OBS_SCALE_DISABLE};
+static int video_updates,scale_updates;
+static bool (*obs_encoder_set_frame_rate_divisor_func)(obs_encoder_t *,uint32_t);
+static void (*obs_encoder_set_gpu_scale_type_func)(obs_encoder_t *,enum obs_scale_type);
+static void obs_encoder_set_video(obs_encoder_t *e,void *v){video_updates++;}
+static void obs_encoder_set_scaled_size(obs_encoder_t *e,uint32_t w,uint32_t h){scale_updates++;}
+
 '''
 
 
@@ -211,7 +230,7 @@ typedef void calldata_t;
 enum output_kind {FILE_OUTPUT,STREAM_OUTPUT,REPLAY_OUTPUT,OUTPUT_COUNT};
 struct start_output;
 enum output_phase {OUTPUT_IDLE,OUTPUT_QUEUED,OUTPUT_STARTING,OUTPUT_ACTIVE,OUTPUT_FAILED,OUTPUT_STOPPING};
-struct output_state {uint64_t next_attempt;unsigned failures;struct start_output *start;enum output_phase phase;obs_output_t *observed_output;bool started_event,stopped_event;};
+struct output_state {uint64_t next_attempt;unsigned failures;struct start_output *start;volatile long phase;obs_output_t *observed_output;bool started_event,stopped_event;};
 struct source_record_filter_context {
  obs_source_t *source;obs_weak_source_t *weak_self;obs_output_t *fileOutput,*streamOutput,*replayOutput;
  bool closing,exiting,record,stream,replayBuffer,output_active;
@@ -233,6 +252,7 @@ static bool os_atomic_load_bool(const volatile bool *v){return *v;}
 static void os_atomic_store_bool(volatile bool *v,bool b){*v=b;}
 static bool os_atomic_set_bool(volatile bool *v,bool x){bool old=*v;*v=x;return old;}
 static long os_atomic_load_long(volatile long *v){return *v;}
+static void os_atomic_store_long(volatile long *v,long n){*v=n;}
 static long os_atomic_inc_long(volatile long *v){return ++*v;}
 static long os_atomic_dec_long(volatile long *v){return --*v;}
 static uint64_t os_gettime_ns(void){return 100;}
@@ -401,6 +421,28 @@ int main(void){struct source_record_filter_context c={0};obs_data_t s={.bitrate=
  assert(!strcmp(c.audioEncoder[0]->id,"opus"));assert(c.audioEncoder[0]->bitrate==192);
  obs_encoder_release(c.audioEncoder[0]);audio_output_close(c.audio_output);obs_data_release(c.applied_audio_settings);
  assert(opens==closes);puts("idle codec and bitrate PASS");}
+''')
+
+    def test_starting_output_defers_audio_swap_until_idle(self):
+        self.run_c(PRELUDE + audio_function() + function("update_video_encoder") + r'''
+int main(void){
+ int phases[]={OUTPUT_QUEUED,OUTPUT_STARTING,OUTPUT_ACTIVE};
+ for(int i=0;i<3;i++){
+  struct source_record_filter_context c={0};obs_data_t s={.bitrate=96};strcpy(s.id,"aac");
+  update_audio_encoder(&c,&s);audio_t *old=c.audio_output;obs_encoder_t *encoder=c.audioEncoder[0];
+  obs_encoder_t video={0};c.encoder=&video;c.video_output=&c;video_updates=scale_updates=0;
+  c.outputs[STREAM_OUTPUT].phase=phases[i];s.different=true;s.track=-1;s.bitrate=192;strcpy(s.id,"opus");
+  update_audio_encoder(&c,&s);update_video_encoder(&c,&s);
+  assert(!video_updates&&!scale_updates);
+  assert(c.audio_settings_pending&&c.audio_output==old&&c.audioEncoder[0]==encoder&&!strcmp(encoder->id,"aac"));
+  c.outputs[STREAM_OUTPUT].phase=OUTPUT_FAILED;c.pending_stops=1;update_audio_encoder(&c,&s);
+  assert(c.audio_output==old&&c.audioEncoder[0]==encoder);
+  c.pending_stops=0;update_audio_encoder(&c,&s);update_video_encoder(&c,&s);
+  assert(video_updates==1&&scale_updates==1);
+  assert(!c.audio_settings_pending&&c.audio_output==&global_audio&&!strcmp(c.audioEncoder[0]->id,"opus"));
+  for(int j=0;j<6;j++)obs_encoder_release(c.audioEncoder[j]);obs_data_release(c.applied_audio_settings);
+ }
+ assert(opens==closes);}
 ''')
 
     def test_audio_idle_callback_needs_no_published_device(self):

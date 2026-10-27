@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import socket
+import threading
 import time
 import sys
 
@@ -151,6 +152,43 @@ def main():
     add("HEALTHY", d, record_mode=1, filename_formatting="healthy")
     paths = files(d)
     before = paths[0].stat().st_size
+    # Keep a TCP connection open without answering RTMP's handshake. The
+    # backend has initialized its encoders but has not begun capture yet.
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(10)
+        slow_port = listener.getsockname()[1]
+        accepted, release = threading.Event(), threading.Event()
+        def hold_connection():
+            try:
+                connection, _ = listener.accept()
+                with connection:
+                    accepted.set()
+                    release.wait(10)
+            except OSError:
+                pass
+        server = threading.Thread(target=hold_connection, daemon=True)
+        server.start()
+        try:
+            pending_before = (root / "obs.log").read_text().count("audio changes pending")
+            add("SLOW_STREAM", root / "slow-stream", stream_mode=1,
+                server=f"rtmp://127.0.0.1:{slow_port}/live", key="synthetic-test-only")
+            wait_for(accepted.is_set, timeout=5, message="RTMP connection started")
+            settings("SLOW_STREAM", {"audio_encoder": "ffmpeg_opus", "different_audio": True, "audio_track": -1})
+            wait_for(lambda: (root / "obs.log").read_text().count("audio changes pending") > pending_before,
+                     timeout=5, message="audio update deferred during RTMP initialization")
+            time.sleep(2)
+            assert (root / "obs.log").read_text().count(f"Connecting to RTMP URL rtmp://127.0.0.1:{slow_port}/live") == 1
+            vendor("stream_stop", {"source": "SR_MEDIA", "filter": "SLOW_STREAM"})
+            # Removal rendezvouses with UI; it must finish before the held
+            # network connection is released (the client's timeout is 5s).
+            remove("SLOW_STREAM")
+        finally:
+            release.set()
+            server.join(timeout=10)
+        assert not server.is_alive()
+    print("PASS H1/H2: connecting stream keeps initialized encoders and leaves UI responsive", flush=True)
     add("FAILED_STREAM", root / "stream", stream_mode=1,
         server=f"rtmp://127.0.0.1:{refused_port}/live", key="synthetic-test-only")
     time.sleep(8)

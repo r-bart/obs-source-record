@@ -29,7 +29,7 @@ struct output_state {
 	uint64_t next_attempt;
 	unsigned failures;
 	struct start_output *start;
-	enum output_phase phase;
+	volatile long phase;
 	obs_output_t *observed_output;
 	bool started_event;
 	bool stopped_event;
@@ -94,6 +94,8 @@ static pthread_mutex_t start_tasks_mutex = PTHREAD_MUTEX_INITIALIZER;
 static volatile long filename_session;
 
 static void *vendor;
+
+static bool encoders_busy(struct source_record_filter_context *context);
 
 static void run_queued(obs_task_t task, void *param)
 {
@@ -376,7 +378,7 @@ static bool output_can_start(struct source_record_filter_context *context, enum 
 	bool starting = context->outputs[kind].start != NULL;
 	pthread_mutex_unlock(&start_tasks_mutex);
 	return output_wanted(context, kind) && !starting &&
-		context->outputs[kind].phase != OUTPUT_STARTING && context->outputs[kind].phase != OUTPUT_ACTIVE &&
+		os_atomic_load_long(&context->outputs[kind].phase) != OUTPUT_STARTING && os_atomic_load_long(&context->outputs[kind].phase) != OUTPUT_ACTIVE &&
 		!obs_output_active(get_output(context, kind)) && !os_atomic_load_long(&context->pending_stops) &&
 		now >= context->outputs[kind].next_attempt;
 }
@@ -390,7 +392,7 @@ static void sync_output_active(struct source_record_filter_context *context)
 	}
 	bool active = os_atomic_load_bool(&context->output_active) && os_atomic_load_long(&context->pending_stops) > 0;
 	for (int i = 0; i < OUTPUT_COUNT; i++)
-		active = active || context->outputs[i].phase == OUTPUT_STARTING || obs_output_active(get_output(context, i));
+		active = active || os_atomic_load_long(&context->outputs[i].phase) == OUTPUT_STARTING || obs_output_active(get_output(context, i));
 	if (active != os_atomic_load_bool(&context->output_active)) {
 		obs_source_t *parent = obs_filter_get_parent(context->source);
 		if (parent) {
@@ -466,8 +468,8 @@ static void consume_start_results(struct source_record_filter_context *context)
 		if (!so)
 			continue;
 		if (!os_atomic_load_bool(&so->cancelled) && get_output(context, i) == so->output && !os_atomic_load_bool(&context->closing) &&
-		    context->outputs[i].phase == OUTPUT_QUEUED) {
-			context->outputs[i].phase = so->started ? OUTPUT_STARTING : OUTPUT_FAILED;
+		    os_atomic_load_long(&context->outputs[i].phase) == OUTPUT_QUEUED) {
+			os_atomic_store_long(&context->outputs[i].phase, so->started ? OUTPUT_STARTING : OUTPUT_FAILED);
 			if (!so->started)
 				note_start_result(context, i, so->output, false);
 		}
@@ -553,12 +555,12 @@ static void consume_output_events(struct source_record_filter_context *context)
 		pthread_mutex_unlock(&start_tasks_mutex);
 		struct output_state *state = &context->outputs[i];
 		if (started) {
-			state->phase = OUTPUT_ACTIVE;
+			os_atomic_store_long(&state->phase, OUTPUT_ACTIVE);
 			note_start_result(context, i, get_output(context, i), true);
 		}
-		if (stopped && state->phase != OUTPUT_FAILED) {
-			state->phase = output_wanted(context, i) ? OUTPUT_FAILED : OUTPUT_IDLE;
-			if (state->phase == OUTPUT_FAILED)
+		if (stopped && os_atomic_load_long(&state->phase) != OUTPUT_FAILED) {
+			os_atomic_store_long(&state->phase, output_wanted(context, i) ? OUTPUT_FAILED : OUTPUT_IDLE);
+			if (os_atomic_load_long(&state->phase) == OUTPUT_FAILED)
 				note_start_result(context, i, get_output(context, i), false);
 		}
 	}
@@ -604,7 +606,7 @@ static void queue_start(struct source_record_filter_context *context, obs_output
 	so->output = obs_output_get_ref(output);
 	so->kind = kind;
 	context->outputs[kind].start = so;
-	context->outputs[kind].phase = OUTPUT_QUEUED;
+	os_atomic_store_long(&context->outputs[kind].phase, OUTPUT_QUEUED);
 	pthread_mutex_unlock(&start_tasks_mutex);
 	observe_output(context, kind, output);
 	run_queued(start_output_task, so);
@@ -815,7 +817,7 @@ static void detach_output(struct source_record_filter_context *context, obs_outp
 		if (get_output(context, i) != output)
 			continue;
 		unobserve_output(context, i);
-		context->outputs[i].phase = OUTPUT_STOPPING;
+		os_atomic_store_long(&context->outputs[i].phase, OUTPUT_STOPPING);
 	}
 	cancel_start(context, output);
 }
@@ -904,6 +906,8 @@ static bool (*obs_encoder_set_frame_rate_divisor_func)(obs_encoder_t *, uint32_t
 
 static void update_video_encoder(struct source_record_filter_context *filter, obs_data_t *settings)
 {
+	if (encoders_busy(filter))
+		return;
 	/* B5: never release/recreate an active encoder here. obs_encoder_video()
 	 * compares against the fps_override wrapper, so with frame_rate_divisor>=2
 	 * it never equals filter->video_output and the old code recreated a live
@@ -1260,6 +1264,24 @@ static void copy_audio_user_values(obs_data_t *from, obs_data_t *to, const char 
 	obs_data_release(defaults);
 }
 
+/* RTMP initializes encoders before its asynchronous connection becomes active.
+ * Preserve that initialized set until capture/stop completes, including drains. */
+static bool encoders_busy(struct source_record_filter_context *context)
+{
+	if (os_atomic_load_long(&context->pending_stops) || obs_encoder_active(context->encoder))
+		return true;
+	for (int i = 0; i < MAX_AUDIO_MIXES; i++)
+		if (obs_encoder_active(context->audioEncoder[i]))
+			return true;
+	obs_output_t *outputs[] = {context->fileOutput, context->streamOutput, context->replayOutput};
+	for (int i = 0; i < OUTPUT_COUNT; i++) {
+		long phase = os_atomic_load_long(&context->outputs[i].phase);
+		if (phase == OUTPUT_QUEUED || phase == OUTPUT_STARTING || phase == OUTPUT_ACTIVE || obs_output_active(outputs[i]))
+			return true;
+	}
+	return false;
+}
+
 static void update_audio_encoder(struct source_record_filter_context *filter, obs_data_t *settings)
 {
 	const int audio_track = obs_data_get_bool(settings, "different_audio") ? (int)obs_data_get_int(settings, "audio_track") : 0;
@@ -1281,14 +1303,12 @@ static void update_audio_encoder(struct source_record_filter_context *filter, ob
 		obs_data_release(audio_settings);
 		return;
 	}
-	for (int i = 0; i < MAX_AUDIO_MIXES; i++) {
-		if (filter->audioEncoder[i] && obs_encoder_active(filter->audioEncoder[i])) {
-			if (!filter->audio_settings_pending)
-				blog(LOG_INFO, "[Source Record] audio changes pending until all outputs stop");
-			filter->audio_settings_pending = true;
-			obs_data_release(audio_settings);
-			return;
-		}
+	if (encoders_busy(filter)) {
+		if (!filter->audio_settings_pending)
+			blog(LOG_INFO, "[Source Record] audio changes pending until all outputs stop");
+		filter->audio_settings_pending = true;
+		obs_data_release(audio_settings);
+		return;
 	}
 
 	const bool own_audio = audio_track == 0;
@@ -1356,6 +1376,10 @@ static void update_audio_encoder(struct source_record_filter_context *filter, ob
 
 static void update_encoder(struct source_record_filter_context *filter, obs_data_t *settings)
 {
+	if (encoders_busy(filter)) {
+		update_audio_encoder(filter, settings);
+		return;
+	}
 	const char *enc_id = get_encoder_id(settings);
 	const bool need_new_encoder = !filter->encoder || strcmp(obs_encoder_get_id(filter->encoder), enc_id) != 0;
 	if (need_new_encoder && filter->encoder && obs_encoder_active(filter->encoder)) {
