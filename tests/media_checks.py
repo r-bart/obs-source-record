@@ -21,9 +21,13 @@ def probe(path):
 
 
 def decode(path, minimum_duration=.3):
-    result = subprocess.run(["ffmpeg", "-v", "error", "-xerror", "-i", str(path), "-f", "null", "-"],
+    result = subprocess.run(["ffmpeg", "-v", "error", "-xerror", "-i", str(path), "-map", "0:v", "-map", "0:a?",
+                             "-progress", "pipe:1", "-nostats", "-f", "null", "-"],
                             capture_output=True, timeout=30)
     assert result.returncode == 0, result.stderr.decode(errors="replace")
+    decoded_frames = [int(line.partition("=")[2].strip()) for line in result.stdout.decode().splitlines()
+                      if line.startswith("frame=")]
+    assert decoded_frames and decoded_frames[-1] > 0, "no decoded video frames"
     info = probe(path)
     assert any(s["codec_type"] == "video" for s in info["streams"]), path
     assert float(info["format"]["duration"]) > minimum_duration, path

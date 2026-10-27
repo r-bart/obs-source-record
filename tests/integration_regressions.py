@@ -99,7 +99,8 @@ def main():
     vendor("record_stop", {})
     stable(paths)
     for path in paths:
-        decode(path)
+        # A correctly stopped recording can contain only a few frames here.
+        decode(path, minimum_duration=0)
     remove("A")
     remove("B")
     print("PASS H4/H6: distinct files and global stop of both filters", flush=True)
