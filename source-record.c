@@ -382,6 +382,11 @@ static bool output_can_start(struct source_record_filter_context *context, enum 
 
 static void sync_output_active(struct source_record_filter_context *context)
 {
+	pthread_mutex_lock(&start_tasks_mutex);
+	if (os_atomic_load_bool(&context->closing)) {
+		pthread_mutex_unlock(&start_tasks_mutex);
+		return;
+	}
 	bool active = os_atomic_load_bool(&context->output_active) && os_atomic_load_long(&context->pending_stops) > 0;
 	for (int i = 0; i < OUTPUT_COUNT; i++)
 		active = active || context->outputs[i].phase == OUTPUT_STARTING || obs_output_active(get_output(context, i));
@@ -395,6 +400,16 @@ static void sync_output_active(struct source_record_filter_context *context)
 		}
 		os_atomic_store_bool(&context->output_active, active);
 	}
+	pthread_mutex_unlock(&start_tasks_mutex);
+}
+
+static void close_filter_showing(struct source_record_filter_context *context, obs_source_t *parent)
+{
+	pthread_mutex_lock(&start_tasks_mutex);
+	os_atomic_store_bool(&context->closing, true);
+	if (os_atomic_set_bool(&context->output_active, false) && parent)
+		obs_source_dec_showing(parent);
+	pthread_mutex_unlock(&start_tasks_mutex);
 }
 
 struct start_output {
@@ -1863,13 +1878,7 @@ static void source_record_filter_destroy(void *data)
 	pthread_mutex_lock(&filters_mutex);
 	da_erase_item(source_record_filters, &context->source);
 	pthread_mutex_unlock(&filters_mutex);
-	os_atomic_store_bool(&context->closing, true);
-	if (os_atomic_load_bool(&context->output_active)) {
-		obs_source_t *parent = obs_filter_get_parent(context->source);
-		if (parent)
-			obs_source_dec_showing(parent);
-		os_atomic_store_bool(&context->output_active, false);
-	}
+	close_filter_showing(context, obs_filter_get_parent(context->source));
 	remove_frontend_cb(context);
 
 	stop_output_sync(context, context->fileOutput);
@@ -2600,9 +2609,8 @@ static void source_record_filter_render(void *data, gs_effect_t *effect)
 
 static void source_record_filter_filter_remove(void *data, obs_source_t *parent)
 {
-	UNUSED_PARAMETER(parent);
 	struct source_record_filter_context *context = data;
-	os_atomic_store_bool(&context->closing, true);
+	close_filter_showing(context, parent);
 	stop_output_sync(context, context->fileOutput);
 	stop_output_sync(context, context->streamOutput);
 	save_replay_hotkeys(context);

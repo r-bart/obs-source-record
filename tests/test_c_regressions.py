@@ -253,7 +253,7 @@ static void obs_queue_task(int kind,obs_task_t f,void *d,bool wait){gfx[ng++]=(s
 static void run_queued_destroy(obs_task_t f,void *d){destroy[nd++]=(struct job){f,d};}
 static void drain(struct job *q,int *n){int count=*n;*n=0;for(int i=0;i<count;i++)q[i].fn(q[i].data);}
 '''
-        names = ("get_output", "output_wanted", "output_can_start", "sync_output_active", "note_start_result",
+        names = ("get_output", "output_wanted", "output_can_start", "sync_output_active", "close_filter_showing", "note_start_result",
                  "start_output_unref", "consume_start_results", "start_output_task", "mark_output_event", "output_started", "output_stopped",
                  "unobserve_output", "observe_output", "consume_output_events", "cancel_start", "queue_start", "detach_output",
                  "stop_output_unref", "finish_stop_task", "release_output_stopped", "force_stop_output_task", "queue_force_stop",
@@ -289,6 +289,9 @@ int main(void) {
  assert(source.refs==1&&async.refs==0);
  c.video_reset=true;c.video_output=&old;c.width=c.height=1920;invalidate_reset_video(&c);
  assert(!c.video_reset&&!c.video_output&&!c.width&&!c.height);
+ c.output_active=true;source.showing=1;close_filter_showing(&c,&source);
+ assert(c.closing&&!c.output_active&&!source.showing);
+ close_filter_showing(&c,&source);stream.active=true;sync_output_active(&c);assert(!source.showing);
  puts("outputs: stale start cancellation, independent backoff, drainage, idempotent stop, reset PASS");
 }
 ''')

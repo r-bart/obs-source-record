@@ -46,7 +46,7 @@ jobs:
       - name: Build test plugin against runner OBS
         run: |
           mkdir -p /tmp/sr-plugin
-          python3 -c 'import pathlib,re; v=re.search(r"VERSION ([0-9.]+)",pathlib.Path("CMakeLists.txt").read_text())[1]; pathlib.Path("/tmp/sr-plugin/version.h").write_text("#define PROJECT_VERSION \""+v+"\"\n")'
+          python3 -c 'import pathlib,re; v=re.search(r"project\(source-record VERSION ([0-9.]+)\)",pathlib.Path("CMakeLists.txt").read_text())[1]; pathlib.Path("/tmp/sr-plugin/version.h").write_text("#define PROJECT_VERSION \""+v+"\"\n")'
           cc -shared -fPIC -g -Wall -Wextra -Wno-unused-parameter -I/tmp/sr-plugin $(pkg-config --cflags libobs) source-record.c -o /tmp/sr-plugin/source-record.so $(pkg-config --libs libobs) -lobs-frontend-api
           obs --version
           sha256sum /tmp/sr-plugin/source-record.so

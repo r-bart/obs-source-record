@@ -120,6 +120,12 @@ def main():
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     password = secrets.token_urlsafe(32)
+    # obs-websocket <=5.3 uses the global INI; newer releases migrate to JSON.
+    legacy_ws = (f"\n[OBSWebSocket]\nFirstLoad=false\nServerEnabled=true\nServerPort={port}\n"
+                 f"AuthRequired=true\nServerPassword={password}\nAlertsEnabled=false\n")
+    for name in ("global.ini", "user.ini"):
+        with (config / name).open("a") as store:
+            store.write(legacy_ws)
     (ws / "config.json").write_text(json.dumps({"server_enabled": True, "server_port": port,
         "server_password": password, "auth_required": True, "alerts_enabled": False, "first_load": False}))
     env = dict(os.environ, XDG_CONFIG_HOME=str(root / "config"), XDG_DATA_HOME=str(root / "data"),
