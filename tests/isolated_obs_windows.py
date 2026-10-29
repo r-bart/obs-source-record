@@ -181,21 +181,13 @@ def main():
                     "plugin": str(plugin), "plugin_sha256": digest(plugin), "executable_sha256": digest(binary)}
             (root / "instance.json").write_text(json.dumps(data))
             deadline = time.monotonic() + 60
-            from isolated_obs import IsolationError
-            import obsws_python as websocket
-            from obsws_python.error import OBSSDKRequestError
+            from isolated_obs import IsolationError, wait_until_ready
             while True:
                 if proc.poll() is not None:
                     raise RuntimeError(f"Private OBS exited during startup: {proc.returncode}")
                 try:
                     verify_windows_instance(root / "instance.json")
-                    with websocket.ReqClient(host="127.0.0.1", port=port, password=password, timeout=5) as client:
-                        try:
-                            client.get_version()
-                        except OBSSDKRequestError as error:
-                            if error.code != 207:
-                                raise
-                            raise IsolationError("Private OBS is still initializing") from error
+                    wait_until_ready(data)
                     break
                 except IsolationError:
                     if time.monotonic() > deadline:

@@ -80,6 +80,23 @@ def connect():
     return obs.ReqClient(host="127.0.0.1", port=data["port"], password=data["password"], timeout=5)
 
 
+def wait_until_ready(data, timeout=30):
+    """Wait for frontend readiness after the runner verified process/socket ownership."""
+    import obsws_python as obs
+    from obsws_python.error import OBSSDKRequestError
+    deadline = time.monotonic() + timeout
+    with obs.ReqClient(host="127.0.0.1", port=data["port"], password=data["password"], timeout=5) as client:
+        while True:
+            try:
+                return client.get_version()
+            except OBSSDKRequestError as error:
+                if error.code != 207:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise IsolationError("Private OBS did not finish initializing") from error
+                time.sleep(.2)
+
+
 def stop_owned(timeout=30):
     data = verify_instance()
     if sys.platform == "win32":
@@ -162,12 +179,13 @@ def main():
                 if proc.poll() is not None:
                     raise IsolationError(f"Test OBS exited with {proc.returncode}")
                 try:
-                    verify_instance(manifest)
+                    data = verify_instance(manifest)
                     break
                 except IsolationError:
                     if time.monotonic() >= deadline:
                         raise
                     time.sleep(.2)
+            wait_until_ready(data)
             result = subprocess.run([sys.executable, str(script)], env=env).returncode
     finally:
         if proc is not None and proc.poll() is None:
