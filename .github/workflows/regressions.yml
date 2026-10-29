@@ -89,7 +89,8 @@ jobs:
           test "$before_status" -eq 1
           grep -q 'FAIL: isolated OBS shutdown timed out' /tmp/sr-plugin/before-result.log
           grep -l 'remove_frontend_cb' /tmp/source-record-test-*/shutdown-backtrace.txt
-          grep -l 'obs_queue_task' /tmp/source-record-test-*/shutdown-backtrace.txt
+          grep -l 'QSemaphore::acquire' /tmp/source-record-test-*/shutdown-backtrace.txt
+          grep -l 'obs_wait_for_destroy_queue' /tmp/source-record-test-*/shutdown-backtrace.txt
           SR_TEST_PLUGIN=/tmp/sr-plugin/fixed.so xvfb-run -a python3 tests/isolated_obs.py /usr/bin/obs tests/repro_shutdown_race.py
       - name: Real OBS regressions in isolated processes
         env:
