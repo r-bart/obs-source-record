@@ -1,1 +1,2 @@
 obsws-python>=1.8
+psutil>=7.0; sys_platform == 'win32'

@@ -51,6 +51,7 @@ def main():
         stable([path])
         info = decode(path)
         assert next(s for s in info["streams"] if s["codec_type"] == "video")["codec_name"] == codec
+        assert any(s["codec_type"] == "audio" for s in info["streams"]), "missing encoded audio"
         print(f"PASS NVENC {codec}: finalized, decoded video and audio", flush=True)
 
     witness = add("WITNESS", "obs_nvenc_h264_tex", root / "witness")
@@ -66,6 +67,7 @@ def main():
     cl.remove_source_filter("NVENC_MEDIA", "WITNESS")
     stable([witness])
     info = decode(witness)
+    assert any(s["codec_type"] == "audio" for s in info["streams"]), "missing witness audio"
     duration = float(info["format"]["duration"])
     assert duration >= 30, duration
     print(f"PASS 12 NVENC record/replay removal cycles; witness decoded ({duration:.1f}s)", flush=True)

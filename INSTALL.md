@@ -62,8 +62,41 @@ Run integration only on a dedicated Linux runner/VM via
 `tests/isolated_obs.py`, with an explicit test plugin binary. All clients require
 its manifest and verify process/configuration/socket ownership. Ambient
 `OBS_WS_*` credentials and attaching to your personal OBS are disabled. Shutdown
-controls only the process owned by the runner. macOS/Windows integration remains
-pending until equivalent isolation is verified.
+controls only the process owned by the runner. macOS integration remains pending.
+
+### Isolated Windows / OBS 33 / NVENC validation
+
+`tests/isolated_obs_windows.py` copies the specified installation into a new
+portable directory. It creates synthetic scenes and media, disables ambient
+plugin paths, and verifies the PID, creation time, executable, working directory,
+portable configuration, loaded plugin hash and WebSocket listener before any
+client connects. It hashes the original installation and personal OBS directories
+before and after each run. It closes only the copied OBS main window with WM_CLOSE.
+
+Requirements: Python, `python -m pip install -r tests/requirements.txt`, FFmpeg and
+ffprobe on PATH, Visual Studio C++ tools, and an explicit OBS 33.0.0 source tree.
+Build and run from PowerShell:
+
+```powershell
+python tests/build_windows_test_plugin.py --obs-source PATH_TO_OBS_33_SOURCE --obs-install 'C:\Program Files\obs-studio' --output build/windows-lab/plugin
+$env:SR_TEST_ENCODER = 'obs_nvenc_h264_tex'
+python tests/isolated_obs_windows.py --obs-install 'C:\Program Files\obs-studio' --plugin build/windows-lab/plugin/source-record.dll --work-root build/windows-lab/runs tests/integration_regressions.py
+python tests/isolated_obs_windows.py --obs-install 'C:\Program Files\obs-studio' --plugin build/windows-lab/plugin/source-record.dll --work-root build/windows-lab/runs tests/windows_nvenc_regressions.py
+$env:SR_WINDOWS_CASE = 'active-close'
+python tests/isolated_obs_windows.py --obs-install 'C:\Program Files\obs-studio' --plugin build/windows-lab/plugin/source-record.dll --work-root build/windows-lab/runs tests/windows_nvenc_regressions.py
+python tests/isolated_obs_windows.py --obs-install 'C:\Program Files\obs-studio' --plugin build/windows-lab/plugin/source-record.dll --work-root build/windows-lab/runs tests/repro_video_reset.py
+```
+
+The NVENC scenarios validate H.264, HEVC and AV1 recordings, twelve record/replay
+filter-removal cycles, a continuous witness recording, and finalization after
+closing with recording and replay still active. This is bounded validation on
+the tested hardware, not a certification of every Windows or encoder setup.
+
+The Linux integration workflow also forces the unregister-versus-UI-shutdown
+ordering in separate test-only plugin builds. It requires the old implementation
+to hang with a captured teardown backtrace, then requires the fixed implementation
+to exit normally. `tests/instrument_shutdown.py` writes a separate C file; the
+distributed plugin has no test barrier.
 
 With file splitting enabled, filenames include a session suffix so concurrent
 muxers have separate namespaces for subsequent segments. Settings retain the

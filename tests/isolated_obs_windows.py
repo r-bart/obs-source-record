@@ -79,12 +79,15 @@ def close_windows_instance(data, timeout=30):
             if title.value.startswith("OBS ") and "SR_TEST" in title.value:
                 user32.PostMessageW(hwnd, 0x0010, 0, 0)
         return True
-    user32.EnumWindows(close_window, 0)
-    try:
-        process.wait(timeout)
-        return True
-    except psutil.TimeoutExpired:
-        return False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        user32.EnumWindows(close_window, 0)
+        try:
+            process.wait(min(.5, max(0, deadline-time.monotonic())))
+            return True
+        except psutil.TimeoutExpired:
+            pass
+    return False
 
 
 def snapshot(paths):
@@ -155,7 +158,7 @@ def main():
         "server_password": password, "auth_required": True, "alerts_enabled": False, "first_load": False}))
     env = dict(os.environ, SR_TEST_MANIFEST=str(root / "instance.json"), TMPDIR=str(root), TEMP=str(root), TMP=str(root))
     for key in list(env):
-        if key.startswith("OBS_WS_") or key in ("OBS_PLUGINS_PATH", "OBS_PLUGINS_DATA_PATH", "OBS_USER_PLUGINS_PATH"):
+        if key.startswith("OBS_WS_") or key in ("OBS_PLUGINS_PATH", "OBS_LEGACY_PLUGINS_PATH", "OBS_LEGACY_PLUGINS_DATA_PATH"):
             del env[key]
     # Libraries that consult the user environment also receive private directories.
     for key in ("APPDATA", "LOCALAPPDATA", "PROGRAMDATA"):
@@ -179,11 +182,20 @@ def main():
             (root / "instance.json").write_text(json.dumps(data))
             deadline = time.monotonic() + 60
             from isolated_obs import IsolationError
+            import obsws_python as websocket
+            from obsws_python.error import OBSSDKRequestError
             while True:
                 if proc.poll() is not None:
                     raise RuntimeError(f"Private OBS exited during startup: {proc.returncode}")
                 try:
                     verify_windows_instance(root / "instance.json")
+                    with websocket.ReqClient(host="127.0.0.1", port=port, password=password, timeout=5) as client:
+                        try:
+                            client.get_version()
+                        except OBSSDKRequestError as error:
+                            if error.code != 207:
+                                raise
+                            raise IsolationError("Private OBS is still initializing") from error
                     break
                 except IsolationError:
                     if time.monotonic() > deadline:
