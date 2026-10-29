@@ -39,7 +39,8 @@ def main():
     kinds = cl.get_input_kind_list(False).input_kinds
     ck = next((k for k in kinds if k.startswith("color_source")), "color_source_v3")
     cl.create_input(SCENE, SRC, ck, {"width": 640, "height": 360}, True)
-    cl.create_source_filter(SRC, "SR_F", "source_record_filter", {"path": tmp, "record_mode": 0, "rec_format": "mp4"})
+    cl.create_source_filter(SRC, "SR_F", "source_record_filter", {"path": tmp, "record_mode": 0, "rec_format": "mp4",
+        "encoder": os.environ.get("SR_TEST_ENCODER", "obs_x264")})
     time.sleep(1.5)  # let the tick create the private view + mix
 
     vs = cl.get_video_settings()

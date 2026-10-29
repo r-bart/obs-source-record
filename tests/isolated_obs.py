@@ -2,7 +2,8 @@
 
 Run on a dedicated runner/VM: python tests/isolated_obs.py /path/to/obs TEST.py
 The runner verifies socket ownership through procfs before allowing any client.
-macOS/Windows are deliberately unsupported until their isolation is verified.
+Windows clients require the separate verified portable Windows runner.
+macOS remains unsupported.
 """
 import hashlib
 import json
@@ -173,10 +174,13 @@ def main():
                 proc.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 if os.environ.get("SR_SHUTDOWN_TRACE") == "1":
-                    with (root / "shutdown-backtrace.txt").open("w") as trace:
-                        subprocess.run(["sudo", "-n", "gdb", "-nx", "--batch", "-p", str(proc.pid),
-                                        "-ex", "set pagination off", "-ex", "thread apply all bt", "-ex", "detach"],
-                                       stdout=trace, stderr=subprocess.STDOUT, timeout=20)
+                    try:
+                        with (root / "shutdown-backtrace.txt").open("w") as trace:
+                            subprocess.run(["sudo", "-n", "gdb", "-nx", "--batch", "-p", str(proc.pid),
+                                            "-ex", "set pagination off", "-ex", "thread apply all bt", "-ex", "detach"],
+                                           stdout=trace, stderr=subprocess.STDOUT, timeout=20)
+                    except (OSError, subprocess.TimeoutExpired) as error:
+                        print(f"Shutdown trace unavailable: {error}", file=sys.stderr)
                 proc.kill()
                 proc.wait(timeout=10)
                 print("FAIL: isolated OBS shutdown timed out", file=sys.stderr)

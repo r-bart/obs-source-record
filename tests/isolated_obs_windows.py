@@ -205,6 +205,18 @@ def main():
             proc.wait(timeout=10)
         if proc is not None and proc.returncode != 0:
             result = 1
+        validation = root / "validate-after-close.json"
+        if result == 0 and validation.is_file():
+            from media_checks import decode
+            for expected in json.loads(validation.read_text())["files"]:
+                path = Path(expected["path"]).resolve()
+                if not path.is_relative_to(root):
+                    raise RuntimeError("Post-shutdown validation path escaped the test root")
+                info = decode(path)
+                codec = next(s for s in info["streams"] if s["codec_type"] == "video")["codec_name"]
+                if codec != expected["codec"]:
+                    raise RuntimeError(f"Unexpected recorded codec: {codec}")
+                print(f"PASS normal shutdown finalized and decoded {path.name}", flush=True)
         after = snapshot(protected)
         unchanged = before == after
         (root / "result.json").write_text(json.dumps({"result": result, "protected_unchanged": unchanged,

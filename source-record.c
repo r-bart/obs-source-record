@@ -1825,10 +1825,14 @@ static void source_record_filter_defaults(obs_data_t *settings)
 }
 
 static void source_record_filter_filter_remove(void *data, obs_source_t *parent);
+static void remove_frontend_cb(struct source_record_filter_context *context);
 
 static void frontend_event(enum obs_frontend_event event, void *data)
 {
-	struct source_record_filter_context *context = data;
+	obs_source_t *source = obs_weak_source_get_source(data);
+	if (!source)
+		return;
+	struct source_record_filter_context *context = obs_obj_get_data(source);
 	if (event == OBS_FRONTEND_EVENT_STREAMING_STARTING || event == OBS_FRONTEND_EVENT_STREAMING_STARTED ||
 	    event == OBS_FRONTEND_EVENT_STREAMING_STOPPING || event == OBS_FRONTEND_EVENT_STREAMING_STOPPED ||
 	    event == OBS_FRONTEND_EVENT_RECORDING_STARTING || event == OBS_FRONTEND_EVENT_RECORDING_STARTED ||
@@ -1837,7 +1841,7 @@ static void frontend_event(enum obs_frontend_event event, void *data)
 	    event == OBS_FRONTEND_EVENT_RECORDING_PAUSED || event == OBS_FRONTEND_EVENT_RECORDING_UNPAUSED) {
 		/* N9: don't act on (or queue update_task for) a closing filter */
 		if (os_atomic_load_bool(&context->closing))
-			return;
+			goto done;
 		context->last_frontend_event = (int)event;
 		if (event == OBS_FRONTEND_EVENT_RECORDING_STOPPED || event == OBS_FRONTEND_EVENT_STREAMING_STOPPED ||
 		    event == OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED)
@@ -1849,13 +1853,17 @@ static void frontend_event(enum obs_frontend_event event, void *data)
 		for (int i = 0; i < OUTPUT_COUNT; i++)
 			cancel_start(context, get_output(context, i));
 		os_atomic_store_bool(&context->exiting, true);
+		remove_frontend_cb(context);
 		obs_source_update(context->source, NULL);
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP) {
 		os_atomic_store_bool(&context->closing, true);
 		for (int i = 0; i < OUTPUT_COUNT; i++)
 			cancel_start(context, get_output(context, i));
+		remove_frontend_cb(context);
 		obs_source_update(context->source, NULL);
 	}
+done:
+	obs_source_release(source);
 }
 
 /* B1: the core "video_reset" signal (OBS 31.1+) fires from obs_reset_video,
@@ -1873,22 +1881,23 @@ static void on_video_reset(void *data, calldata_t *cd)
  * is a data race. Do the removal on the UI thread instead. */
 static void remove_frontend_cb_task(void *data)
 {
-	struct source_record_filter_context *context = data;
-	signal_handler_disconnect(obs_get_signal_handler(), "video_reset", on_video_reset, context);
-	obs_frontend_remove_event_callback(frontend_event, context);
+	obs_weak_source_t *weak = data;
+	obs_frontend_remove_event_callback(frontend_event, weak);
+	obs_weak_source_release(weak);
 }
 
 static void remove_frontend_cb(struct source_record_filter_context *context)
 {
 	if (!os_atomic_set_bool(&context->frontend_callback_registered, false))
 		return;
-	/* wait=true rendezvouses so no in-flight frontend_event uses a freed
-	 * context; skip the hop while exiting (UI may be joining the destruction
-	 * thread during obs_shutdown -> deadlock) or if already on the UI thread. */
-	if (os_atomic_load_bool(&context->exiting) || obs_in_task_thread(OBS_TASK_UI))
-		remove_frontend_cb_task(context);
+	signal_handler_disconnect(obs_get_signal_handler(), "video_reset", on_video_reset, context);
+	/* The UI can be waiting for the graphics/destruction thread during close.
+	 * Queue only the registration's weak reference, never the freed context,
+	 * so teardown does not have to rendezvous with that UI thread. */
+	if (obs_in_task_thread(OBS_TASK_UI))
+		remove_frontend_cb_task(context->weak_self);
 	else
-		obs_queue_task(OBS_TASK_UI, remove_frontend_cb_task, context, true);
+		obs_queue_task(OBS_TASK_UI, remove_frontend_cb_task, context->weak_self, false);
 }
 
 static void *source_record_filter_create(obs_data_t *settings, obs_source_t *source)
@@ -1906,7 +1915,8 @@ static void *source_record_filter_create(obs_data_t *settings, obs_source_t *sou
 	context->splitHotkey = OBS_INVALID_HOTKEY_ID;
 	context->chapterHotkey = OBS_INVALID_HOTKEY_ID;
 	source_record_filter_update(context, settings);
-	obs_frontend_add_event_callback(frontend_event, context);
+	obs_weak_source_addref(context->weak_self);
+	obs_frontend_add_event_callback(frontend_event, context->weak_self);
 	os_atomic_store_bool(&context->frontend_callback_registered, true);
 	signal_handler_connect(obs_get_signal_handler(), "video_reset", on_video_reset, context);
 	return context;

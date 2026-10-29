@@ -484,6 +484,7 @@ int main(void){struct source_record_filter_context c={0};uint64_t out=0;
 typedef void (*obs_task_t)(void *);
 typedef void obs_data_t;
 typedef void obs_source_t;
+typedef void obs_weak_source_t;
 struct source_record_filter_context {
  void *source,*weak_self;int last_frontend_event,enableHotkey,pauseHotkeys,splitHotkey,chapterHotkey;
  bool frontend_callback_registered,exiting;
@@ -493,7 +494,10 @@ static pthread_mutex_t filters_mutex=PTHREAD_MUTEX_INITIALIZER;
 static bool os_atomic_set_bool(volatile bool *v,bool n){bool old=*v;*v=n;return old;}
 static void os_atomic_store_bool(volatile bool *v,bool n){*v=n;}
 static bool os_atomic_load_bool(const volatile bool *v){return *v;}
-static int registered,removed,connected,disconnected,waits,initial_updates,deferred_updates;
+static int registered,removed,connected,disconnected,waits,queued,weak_refs,initial_updates,deferred_updates;
+static bool ui_thread;
+static obs_task_t queued_task;
+static void *queued_data;
 static void frontend_event(int event,void *data){}
 static void on_video_reset(void *data,void *cd){}
 static void *obs_get_signal_handler(void){return NULL;}
@@ -501,18 +505,68 @@ static void signal_handler_connect(void *sh,const char *n,void(*fn)(void*,void*)
 static void signal_handler_disconnect(void *sh,const char *n,void(*fn)(void*,void*),void *d){disconnected++;}
 static void obs_frontend_add_event_callback(void(*fn)(int,void*),void *d){registered++;}
 static void obs_frontend_remove_event_callback(void(*fn)(int,void*),void *d){removed++;}
-static void *obs_source_get_weak_source(void *s){return s;}
+static void *obs_source_get_weak_source(void *s){weak_refs++;return s;}
+static void obs_weak_source_addref(void *s){weak_refs++;}
+static void obs_weak_source_release(void *s){weak_refs--;assert(weak_refs>=0);}
 static void source_record_filter_update(void *d,void *settings){initial_updates++;}
 static void obs_source_update(void *s,void *settings){assert(s==(void*)42);deferred_updates++;}
-static bool obs_in_task_thread(int kind){return false;}
-static void obs_queue_task(int kind,obs_task_t fn,void *v,bool wait){assert(wait);waits++;fn(v);}
+static bool obs_in_task_thread(int kind){return ui_thread;}
+static void obs_queue_task(int kind,obs_task_t fn,void *v,bool wait){assert(!wait);queued++;queued_task=fn;queued_data=v;}
 ''' + "\n".join(function(n) for n in ("remove_frontend_cb_task", "remove_frontend_cb", "source_record_filter_create", "source_record_filter_load")) + r'''
 int main(void){struct source_record_filter_context *c=source_record_filter_create(NULL,(void*)42);
  assert(c->frontend_callback_registered&&registered==1&&connected==1);
  source_record_filter_load(c,NULL);assert(initial_updates==1&&deferred_updates==1);
- remove_frontend_cb(c);remove_frontend_cb(c);assert(removed==1&&disconnected==1&&waits==1);free(c);
- c=source_record_filter_create(NULL,(void*)42);c->exiting=true;
- remove_frontend_cb(c);assert(registered==2&&connected==2&&removed==2&&disconnected==2&&waits==1);free(c);}
+ remove_frontend_cb(c);remove_frontend_cb(c);assert(removed==0&&disconnected==1&&queued==1&&weak_refs==2);
+ /* The UI is joining teardown: free the context before it drains its queue. */
+ obs_weak_source_release(c->weak_self);free(c);assert(weak_refs==1);
+ queued_task(queued_data);assert(removed==1&&weak_refs==0);
+ c=source_record_filter_create(NULL,(void*)42);c->exiting=true;ui_thread=true;
+ remove_frontend_cb(c);assert(registered==2&&connected==2&&removed==2&&disconnected==2&&queued==1);
+ obs_weak_source_release(c->weak_self);free(c);assert(weak_refs==0);}
+''')
+
+    def test_frontend_callback_uses_weak_reference_after_context_teardown(self):
+        self.run_c(r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stddef.h>
+typedef void obs_source_t;
+enum obs_frontend_event {
+ OBS_FRONTEND_EVENT_STREAMING_STARTING, OBS_FRONTEND_EVENT_STREAMING_STARTED,
+ OBS_FRONTEND_EVENT_STREAMING_STOPPING, OBS_FRONTEND_EVENT_STREAMING_STOPPED,
+ OBS_FRONTEND_EVENT_RECORDING_STARTING, OBS_FRONTEND_EVENT_RECORDING_STARTED,
+ OBS_FRONTEND_EVENT_RECORDING_STOPPING, OBS_FRONTEND_EVENT_RECORDING_STOPPED,
+ OBS_FRONTEND_EVENT_VIRTUALCAM_STARTED, OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED,
+ OBS_FRONTEND_EVENT_RECORDING_PAUSED, OBS_FRONTEND_EVENT_RECORDING_UNPAUSED,
+ OBS_FRONTEND_EVENT_EXIT, OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN,
+ OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP
+};
+#define OUTPUT_COUNT 3
+struct source_record_filter_context {void *source;bool closing,exiting,max_seconds_reached;int last_frontend_event;};
+static struct source_record_filter_context context={.source=(void*)42};
+static bool live;
+static int upgrades,releases,updates,removals;
+static void *obs_weak_source_get_source(void *w){assert(w==(void*)43);upgrades++;return live?context.source:NULL;}
+static void *obs_obj_get_data(void *s){assert(s==context.source);return &context;}
+static void obs_source_release(void *s){assert(s==context.source);releases++;}
+static void obs_source_update(void *s,void *v){assert(s==context.source);updates++;}
+static bool os_atomic_load_bool(const volatile bool *v){return *v;}
+static void os_atomic_store_bool(volatile bool *v,bool n){*v=n;}
+static void *get_output(struct source_record_filter_context *c,int i){return NULL;}
+static void cancel_start(struct source_record_filter_context *c,void *o){}
+static void remove_frontend_cb(struct source_record_filter_context *c){removals++;}
+''' + function("frontend_event") + r'''
+int main(void){
+ frontend_event(OBS_FRONTEND_EVENT_RECORDING_STARTED,(void*)43);
+ assert(upgrades==1&&releases==0&&updates==0);
+ live=true;frontend_event(OBS_FRONTEND_EVENT_RECORDING_STARTED,(void*)43);
+ assert(upgrades==2&&releases==1&&updates==1);
+ context.closing=true;frontend_event(OBS_FRONTEND_EVENT_RECORDING_STARTED,(void*)43);
+ assert(releases==2&&updates==1);
+ frontend_event(OBS_FRONTEND_EVENT_EXIT,(void*)43);
+ assert(releases==3&&updates==2&&removals==1&&context.exiting);
+ live=false;frontend_event(OBS_FRONTEND_EVENT_EXIT,(void*)43);
+ assert(releases==3&&updates==2&&removals==1);}
 ''')
 
 
