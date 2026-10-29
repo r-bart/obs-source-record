@@ -36,6 +36,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -66,6 +68,28 @@ jobs:
           cc -shared -fPIC -g -Wall -Wextra -Wno-unused-parameter -I/tmp/sr-plugin $(pkg-config --cflags libobs) source-record.c -o /tmp/sr-plugin/source-record.so $(pkg-config --libs libobs) -lobs-frontend-api
           obs --version
           sha256sum /tmp/sr-plugin/source-record.so
+      - name: Deterministic shutdown race, old implementation must deadlock and fixed must exit
+        env:
+          SR_TEST_SHUTDOWN_RACE: '1'
+          SR_SHUTDOWN_TRACE: '1'
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          QT_X11_NO_MITSHM: '1'
+        run: |
+          git show 5fc804bf919b7c42a48ebd424e72e9fe0465ac22:source-record.c > /tmp/sr-plugin/before.c
+          python3 tests/instrument_shutdown.py /tmp/sr-plugin/before.c /tmp/sr-plugin/before-instrumented.c
+          python3 tests/instrument_shutdown.py source-record.c /tmp/sr-plugin/fixed-instrumented.c
+          for variant in before fixed; do
+            cc -shared -fPIC -g -Wall -Wextra -Wno-unused-parameter -I/tmp/sr-plugin -I. $(pkg-config --cflags libobs) /tmp/sr-plugin/$variant-instrumented.c -o /tmp/sr-plugin/$variant.so $(pkg-config --libs libobs) -lobs-frontend-api
+          done
+          set +e
+          SR_TEST_PLUGIN=/tmp/sr-plugin/before.so xvfb-run -a python3 tests/isolated_obs.py /usr/bin/obs tests/repro_shutdown_race.py > /tmp/sr-plugin/before-result.log 2>&1
+          before_status=$?
+          set -e
+          cat /tmp/sr-plugin/before-result.log
+          test "$before_status" -eq 1
+          grep -q 'FAIL: isolated OBS shutdown timed out' /tmp/sr-plugin/before-result.log
+          grep -l 'remove_frontend_cb' /tmp/source-record-test-*/shutdown-backtrace.txt
+          SR_TEST_PLUGIN=/tmp/sr-plugin/fixed.so xvfb-run -a python3 tests/isolated_obs.py /usr/bin/obs tests/repro_shutdown_race.py
       - name: Real OBS regressions in isolated processes
         env:
           SR_TEST_PLUGIN: /tmp/sr-plugin/source-record.so

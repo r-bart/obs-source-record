@@ -140,6 +140,9 @@ def main():
         "server_password": password, "auth_required": True, "alerts_enabled": False, "first_load": False}))
     env = dict(os.environ, XDG_CONFIG_HOME=str(root / "config"), XDG_DATA_HOME=str(root / "data"),
                XDG_CACHE_HOME=str(root / "cache"), TMPDIR=str(root), SR_TEST_MANIFEST=str(root / "instance.json"))
+    if os.environ.get("SR_TEST_SHUTDOWN_RACE") == "1":
+        env.update(SR_TEST_SHUTDOWN_READY=str(root / "cleanup-ready"),
+                   SR_TEST_SHUTDOWN_RELEASE=str(root / "cleanup-release"))
     for key in ("OBS_WS_HOST", "OBS_WS_PORT", "OBS_WS_PASSWORD", "SR_MANAGE_OBS"):
         env.pop(key, None)
     proc = None
