@@ -34,8 +34,19 @@ captura de hilos que incluya `remove_frontend_cb`. La implementación corregida
 debe terminar normalmente bajo el mismo orden. La barrera nunca se incorpora al
 plugin distribuido.
 
-- [Validación de la corrección: 16 tests y tres repeticiones de integración](https://github.com/r-bart/obs-source-record/actions/runs/40867060790).
-- [Reproducción controlada y regresiones completas](https://github.com/r-bart/obs-source-record/actions/runs/40867411043).
+La captura descargada de la ejecución `40867411043` demuestra ambas esperas:
+
+- Hilo de retirada: `remove_frontend_cb` → `QMetaObject::invokeMethod` →
+  `QSemaphore::acquire`.
+- Hilo UI: `QWidget::event` → `obs_wait_for_destroy_queue` →
+  `os_task_queue_wait` → `os_event_wait`.
+
+No queda un hilo detenido dentro de la barrera del test: la retirada ya llegó a
+la espera de Qt. La copia corregida salió normalmente bajo ese mismo orden.
+
+- [Validación final: 19 tests, reproducción controlada y todas las regresiones reales, PASS](https://github.com/r-bart/obs-source-record/actions/runs/40868748293).
+- [Validación anterior de la corrección: 16 tests y tres repeticiones de integración](https://github.com/r-bart/obs-source-record/actions/runs/40867060790).
+- [Primera reproducción controlada; fallo posterior del runner por inicialización 207](https://github.com/r-bart/obs-source-record/actions/runs/40867411043).
 - [Control anterior sin corrección, tres integraciones](https://github.com/r-bart/obs-source-record/actions/runs/40866091259).
 
 Los fixtures C usan ASan/UBSan. La integración usa OBS 30.0.2 en Ubuntu 24.04,
@@ -81,6 +92,19 @@ OBS termine de inicializar antes del primer escenario. Un intento temprano del
 reset recibió el error WebSocket 207 y no ejecutó el escenario; la repetición con
 la espera correcta pasó. Los resultados fallidos del banco de pruebas se
 conservan en el laboratorio, no se cuentan como validaciones aprobadas.
+
+La ejecución Linux `40867411043` también llegó al reset antes de que el frontend
+estuviera listo y recibió 207. La espera de disponibilidad se comparte ahora
+entre los dos runners y tiene tres regresiones: reintentar solo 207, propagar
+otros errores y respetar un plazo máximo. No se cambió la DLL para resolver ese
+fallo del runner.
+
+La ejecución final `40868748293`, commit `f807b95`, termina con **unit e
+integration en verde**: 19 tests, compilación completa contra OBS 31.1.2,
+comparación controlada antes/después del cierre, tres integraciones consecutivas,
+tres ciclos de la regresión #99, cambio de ruta y reset de vídeo. La prueba
+negativa anterior agota el plazo deliberadamente; el caso corregido termina sin
+forzar su cierre. El reset ya no recibe 207.
 
 ## Artefactos y conservación de la instalación habitual
 
