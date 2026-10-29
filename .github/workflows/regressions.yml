@@ -57,7 +57,7 @@ jobs:
           EOF
           sr_apt_args=(-o Dir::Etc::sourcelist=/tmp/sr-ubuntu.sources -o Dir::Etc::sourceparts=- -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Dpkg::Lock::Timeout=60)
           sudo apt-get "${sr_apt_args[@]}" update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get "${sr_apt_args[@]}" install -y --no-install-recommends obs-studio libobs-dev ffmpeg xvfb xauth libgl1-mesa-dri
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get "${sr_apt_args[@]}" install -y --no-install-recommends obs-studio libobs-dev ffmpeg xvfb xauth libgl1-mesa-dri gdb
           python3 -m pip install -r tests/requirements.txt
       - name: Build test plugin against runner OBS
         run: |
@@ -71,8 +71,11 @@ jobs:
           SR_TEST_PLUGIN: /tmp/sr-plugin/source-record.so
           LIBGL_ALWAYS_SOFTWARE: '1'
           QT_X11_NO_MITSHM: '1'
+          SR_SHUTDOWN_TRACE: '1'
         run: |
-          xvfb-run -a python3 tests/isolated_obs.py /usr/bin/obs tests/integration_regressions.py
+          for attempt in 1 2 3; do
+            xvfb-run -a python3 tests/isolated_obs.py /usr/bin/obs tests/integration_regressions.py
+          done
           xvfb-run -a python3 tests/isolated_obs.py /usr/bin/obs tests/repro_stall99.py
           xvfb-run -a python3 tests/isolated_obs.py /usr/bin/obs tests/repro_settings_restart.py
           xvfb-run -a python3 tests/isolated_obs.py /usr/bin/obs tests/repro_video_reset.py

@@ -31,6 +31,12 @@ def process_identity(pid):
 
 
 def verify_instance(manifest=None):
+    if sys.platform == "win32":
+        path = Path(manifest or os.environ.get("SR_TEST_MANIFEST", ""))
+        if not path.is_file():
+            raise IsolationError("Missing runner manifest; attaching to OBS is disabled")
+        from isolated_obs_windows import verify_windows_instance
+        return verify_windows_instance(path)
     if not sys.platform.startswith("linux"):
         raise IsolationError("Integration requires the dedicated Linux runner; no local OBS connection allowed")
     path = Path(manifest or os.environ.get("SR_TEST_MANIFEST", ""))
@@ -75,6 +81,9 @@ def connect():
 
 def stop_owned(timeout=30):
     data = verify_instance()
+    if sys.platform == "win32":
+        from isolated_obs_windows import close_windows_instance
+        return close_windows_instance(data, timeout)
     pid = int(data["pid"])
     os.kill(pid, signal.SIGINT)
     deadline = time.monotonic() + timeout
@@ -163,6 +172,11 @@ def main():
             try:
                 proc.wait(timeout=30)
             except subprocess.TimeoutExpired:
+                if os.environ.get("SR_SHUTDOWN_TRACE") == "1":
+                    with (root / "shutdown-backtrace.txt").open("w") as trace:
+                        subprocess.run(["sudo", "-n", "gdb", "-nx", "--batch", "-p", str(proc.pid),
+                                        "-ex", "set pagination off", "-ex", "thread apply all bt", "-ex", "detach"],
+                                       stdout=trace, stderr=subprocess.STDOUT, timeout=20)
                 proc.kill()
                 proc.wait(timeout=10)
                 print("FAIL: isolated OBS shutdown timed out", file=sys.stderr)

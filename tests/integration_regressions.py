@@ -19,6 +19,7 @@ from media_checks import decode, probe, stable, wait_for
 def main():
     instance = verify_instance()
     root = Path(instance["root"])
+    obs_log = Path(instance.get("log", root / "obs.log"))
     cl = connect()
     def request(kind, data=None):
         return cl.send(kind, data or {}, raw=True)
@@ -40,7 +41,7 @@ def main():
     def add(name, directory, **settings):
         directory.mkdir(parents=True, exist_ok=True)
         values = {"path": str(directory), "filename_formatting": "collision", "rec_format": "mp4",
-                  "record_mode": 0, "stream_mode": 0, "encoder": "obs_x264", "audio_encoder": "ffmpeg_aac",
+                  "record_mode": 0, "stream_mode": 0, "encoder": os.environ.get("SR_TEST_ENCODER", "obs_x264"), "audio_encoder": "ffmpeg_aac",
                   "audio_bitrate": 128, "bitrate": 1500, "rate_control": "CBR", "keyint_sec": 1,
                   "preset": "ultrafast", "remove_after_record": False}
         values.update(settings)
@@ -171,15 +172,15 @@ def main():
         server = threading.Thread(target=hold_connection, daemon=True)
         server.start()
         try:
-            pending_before = (root / "obs.log").read_text().count("audio changes pending")
+            pending_before = obs_log.read_text().count("audio changes pending")
             add("SLOW_STREAM", root / "slow-stream", stream_mode=1,
                 server=f"rtmp://127.0.0.1:{slow_port}/live", key="synthetic-test-only")
             wait_for(accepted.is_set, timeout=5, message="RTMP connection started")
             settings("SLOW_STREAM", {"audio_encoder": "ffmpeg_opus", "different_audio": True, "audio_track": -1})
-            wait_for(lambda: (root / "obs.log").read_text().count("audio changes pending") > pending_before,
+            wait_for(lambda: obs_log.read_text().count("audio changes pending") > pending_before,
                      timeout=5, message="audio update deferred during RTMP initialization")
             time.sleep(2)
-            assert (root / "obs.log").read_text().count(f"Connecting to RTMP URL rtmp://127.0.0.1:{slow_port}/live") == 1
+            assert obs_log.read_text().count(f"Connecting to RTMP URL rtmp://127.0.0.1:{slow_port}/live") == 1
             vendor("stream_stop", {"source": "SR_MEDIA", "filter": "SLOW_STREAM"})
             # Removal rendezvouses with UI; it must finish before the held
             # network connection is released (the client's timeout is 5s).
@@ -193,7 +194,7 @@ def main():
         server=f"rtmp://127.0.0.1:{refused_port}/live", key="synthetic-test-only")
     time.sleep(8)
     assert paths[0].stat().st_size > before, "failed stream stalled healthy recording"
-    log = (root / "obs.log").read_text()
+    log = obs_log.read_text()
     attempts = log.count(f"Connecting to RTMP URL rtmp://127.0.0.1:{refused_port}/live")
     assert 2 <= attempts <= 5, f"unexpected retry/backoff count: {attempts}"
     vendor("stream_stop", {"source": "SR_MEDIA", "filter": "FAILED_STREAM"})
